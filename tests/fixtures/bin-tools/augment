@@ -1,0 +1,23 @@
+#!/bin/bash
+# Fake augment CLI for testing aegis integration.
+# Note: aegis calls this tool "auggie" but binary is "augment"
+
+set -e
+
+# Handle special flags
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            echo "fake-augment version 1.0.0-test"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: fake-augment [options]"
+            echo "A fake Augment CLI for testing aegis sandbox."
+            exit 0
+            ;;
+    esac
+done
+
+echo "fake-augment: running with args: $*"
+exit 0

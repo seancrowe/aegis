@@ -1,0 +1,77 @@
+# Dockerfile for running aegis Layer 4 tests (real CLI smoke tests)
+# This image installs all supported AI CLI tools and runs e2e tests
+#
+# Usage:
+#   docker build -f tests/docker/Dockerfile.layer4 -t aegis-layer4-tests .
+#   docker run --rm --privileged aegis-layer4-tests
+#
+# The --privileged flag is required for bubblewrap to work inside Docker.
+
+FROM oven/bun:1-debian
+
+LABEL maintainer="aegis-tests"
+LABEL description="aegis Layer 4 test runner with all AI CLI tools"
+
+# Install bubblewrap and utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    git \
+    procps \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify bwrap is installed and working
+RUN bwrap --version
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package.json bun.lock* ./
+
+# Install project dependencies
+RUN bun install --frozen-lockfile || bun install
+
+# Install all AI CLI tools globally using bun
+# Note: Some of these may fail to install if packages don't exist or have issues
+# We use || true to continue even if individual installs fail
+
+# Claude Code - Anthropic's official CLI
+RUN bun install -g @anthropic-ai/claude-code || echo "Warning: @anthropic-ai/claude-code install failed"
+
+# Codex (OpenAI) - OpenAI's CLI coding assistant
+RUN bun install -g openai-codex-cli || echo "Warning: openai-codex-cli install failed"
+
+# Gemini CLI - Google's generative AI CLI
+RUN bun install -g @google/generative-ai-cli || echo "Warning: @google/generative-ai-cli install failed"
+
+# Auggie (Augment CLI)
+RUN bun install -g augment-cli || echo "Warning: augment-cli install failed"
+
+# OpenCode - AI coding assistant
+RUN bun install -g opencode-ai || echo "Warning: opencode-ai install failed"
+
+# Crush - Charm's AI CLI
+RUN bun install -g @charmbracelet/crush || echo "Warning: @charmbracelet/crush install failed"
+
+# Copy the rest of the application
+COPY . .
+
+# Make fixture scripts executable
+RUN chmod +x tests/fixtures/bin-tools/* tests/fixtures/bin-bwrap/*
+
+# Add bun's global bin to PATH
+ENV PATH="/root/.bun/bin:$PATH"
+
+# List installed CLIs for debugging
+RUN echo "=== Installed CLI tools ===" && \
+    echo "claude: $(which claude 2>/dev/null || echo 'not found')" && \
+    echo "codex: $(which codex 2>/dev/null || echo 'not found')" && \
+    echo "gemini: $(which gemini 2>/dev/null || echo 'not found')" && \
+    echo "augment: $(which augment 2>/dev/null || echo 'not found')" && \
+    echo "opencode: $(which opencode 2>/dev/null || echo 'not found')" && \
+    echo "crush: $(which crush 2>/dev/null || echo 'not found')" && \
+    echo "=========================="
+
+# Default command runs Layer 4 e2e tests
+CMD ["bun", "test", "tests/e2e"]

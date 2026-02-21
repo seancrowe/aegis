@@ -1,0 +1,82 @@
+# Dockerfile for running aegis Layer 3 tests (real bubblewrap semantic tests)
+# This image requires running with --privileged flag
+#
+# Usage:
+#   docker build -f tests/docker/Dockerfile.layer3 -t aegis-layer3-tests .
+#   docker run --rm --privileged aegis-layer3-tests
+
+FROM oven/bun:1-debian
+
+LABEL maintainer="aegis-tests"
+LABEL description="aegis Layer 3 test runner with real bubblewrap"
+
+# Install bubblewrap and utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    git \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify bwrap is installed and working
+RUN bwrap --version
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package.json bun.lock* ./
+
+# Install dependencies
+RUN bun install --frozen-lockfile || bun install
+
+# Copy the rest of the application
+COPY . .
+
+# Make fixture scripts executable
+RUN chmod +x tests/fixtures/bin-tools/* tests/fixtures/bin-bwrap/*
+
+# Create a test user (bwrap sometimes has issues running as root)
+RUN useradd -m -s /bin/bash testuser && \
+    chown -R testuser:testuser /app
+
+# Switch to test user
+USER testuser
+
+# =============================================================================
+# Set up predictable test filesystem for semantic tests
+# =============================================================================
+
+# Sensitive directories (should be hidden with --hide-home)
+RUN mkdir -p ~/.ssh && \
+    echo "ssh-rsa AAAA... fake-key" > ~/.ssh/id_rsa && \
+    echo "Host *" > ~/.ssh/config && \
+    chmod 600 ~/.ssh/id_rsa
+
+RUN mkdir -p ~/.aws && \
+    echo "[default]" > ~/.aws/credentials && \
+    echo "aws_access_key_id=AKIAEXAMPLE" >> ~/.aws/credentials
+
+RUN mkdir -p ~/.gnupg && \
+    echo "fake-gpg-data" > ~/.gnupg/pubring.kbx && \
+    chmod 700 ~/.gnupg
+
+RUN echo "super-secret-api-key" > ~/.secret-credentials
+
+# .claude directory (should be VISIBLE even with --hide-home)
+RUN mkdir -p ~/.claude && \
+    echo '{"version": 1}' > ~/.claude/settings.json && \
+    echo '{}' > ~/.claude.json
+
+# Project with secrets (for --hide flag testing)
+RUN mkdir -p /home/testuser/project/secrets && \
+    echo "api-key=sk-test-12345" > /home/testuser/project/secrets/api-key.txt && \
+    echo "password=hunter2" > /home/testuser/project/secrets/db-password.txt && \
+    echo "This is a normal README" > /home/testuser/project/README.md
+
+# Set working directory to project
+WORKDIR /home/testuser/project
+
+# Set environment variable pointing to project directory
+ENV AEGIS_TEST_PROJECT_DIR=/home/testuser/project
+
+# Default command runs Layer 3 semantic tests
+CMD ["bun", "test", "/app/tests/integration/bwrapSemantic.test.ts"]

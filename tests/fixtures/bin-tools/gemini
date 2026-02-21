@@ -1,0 +1,23 @@
+#!/bin/bash
+# Fake gemini CLI for testing aegis integration.
+# Mimics the claude fake CLI pattern.
+
+set -e
+
+# Handle special flags
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            echo "fake-gemini version 1.0.0-test"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: fake-gemini [options]"
+            echo "A fake Gemini CLI for testing aegis sandbox."
+            exit 0
+            ;;
+    esac
+done
+
+echo "fake-gemini: running with args: $*"
+exit 0

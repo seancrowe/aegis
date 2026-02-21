@@ -1,0 +1,23 @@
+#!/bin/bash
+# Fake bwrap that signals when called.
+# Used to prove --dry-run doesn't execute bwrap.
+#
+# This script will:
+# 1. Write to a sentinel file if AEGIS_BWRAP_SENTINEL is set
+# 2. Exit with code 99 to make it obvious if accidentally invoked
+
+set -e
+
+# If sentinel path is set, create the sentinel file
+if [ -n "$AEGIS_BWRAP_SENTINEL" ]; then
+    echo "BWRAP_CALLED" > "$AEGIS_BWRAP_SENTINEL"
+    echo "ARGS: $*" >> "$AEGIS_BWRAP_SENTINEL"
+    echo "TIME: $(date -Iseconds)" >> "$AEGIS_BWRAP_SENTINEL"
+fi
+
+# Print diagnostic message to stderr
+echo "ERROR: fake-bwrap was invoked when it should not have been!" >&2
+echo "Args: $*" >&2
+
+# Exit with distinctive code
+exit 99

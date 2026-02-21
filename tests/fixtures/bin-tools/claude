@@ -1,0 +1,70 @@
+#!/bin/bash
+# Fake claude CLI for testing aegis sandbox semantics.
+# Uses ls-based approach to verify directory visibility in sandbox.
+
+set -e
+
+# Output arguments
+echo "=== ARGS ==="
+echo "argc=$#"
+for arg in "$@"; do
+    echo "arg: $arg"
+done
+
+# Handle special flags
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            echo "fake-claude version 1.0.0-test"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: fake-claude [options]"
+            echo "A fake Claude CLI for testing aegis sandbox."
+            exit 0
+            ;;
+    esac
+done
+
+# Helper function: list directory contents
+# Args: $1 = directory path, $2 = label for output
+ls_dir() {
+    local dir="$1"
+    local label="$2"
+    echo ""
+    echo "=== LS:$label ==="
+    if [ -d "$dir" ]; then
+        ls -1A "$dir" 2>/dev/null || echo "ERROR:CANNOT_LIST"
+    else
+        echo "ERROR:NOT_A_DIRECTORY"
+    fi
+}
+
+# List home directory contents
+ls_dir "$HOME" "HOME"
+
+# List sensitive directories (should be hidden with --hide-home)
+ls_dir "$HOME/.ssh" "HOME/.ssh"
+ls_dir "$HOME/.aws" "HOME/.aws"
+ls_dir "$HOME/.gnupg" "HOME/.gnupg"
+
+# List .claude directory (should be visible even with --hide-home)
+ls_dir "$HOME/.claude" "HOME/.claude"
+
+# Check for secret credential file
+echo ""
+echo "=== SECRET_CREDENTIAL_FILE ==="
+if [ -f "$HOME/.secret-credentials" ]; then
+    echo "EXISTS=true"
+else
+    echo "EXISTS=false"
+fi
+
+# List project secrets if AEGIS_TEST_PROJECT_DIR is set
+if [ -n "$AEGIS_TEST_PROJECT_DIR" ]; then
+    ls_dir "$AEGIS_TEST_PROJECT_DIR/secrets" "PROJECT/secrets"
+fi
+
+echo ""
+echo "=== DONE ==="
+exit 0

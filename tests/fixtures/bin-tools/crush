@@ -1,0 +1,22 @@
+#!/bin/bash
+# Fake crush CLI for testing aegis integration.
+
+set -e
+
+# Handle special flags
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            echo "fake-crush version 1.0.0-test"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: fake-crush [options]"
+            echo "A fake Crush CLI for testing aegis sandbox."
+            exit 0
+            ;;
+    esac
+done
+
+echo "fake-crush: running with args: $*"
+exit 0

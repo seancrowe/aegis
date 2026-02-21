@@ -1,0 +1,7 @@
+[test]
+# Test configuration for aegis
+# Note: L1/L2 tests are run via `bun test` with explicit paths in package.json
+# L3/L4 tests require Docker and are run via `bun run scripts/test.ts`
+
+# Default test root
+root = "./tests"

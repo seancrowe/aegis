@@ -1,0 +1,22 @@
+#!/bin/bash
+# Fake opencode CLI for testing aegis integration.
+
+set -e
+
+# Handle special flags
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            echo "fake-opencode version 1.0.0-test"
+            exit 0
+            ;;
+        --help)
+            echo "Usage: fake-opencode [options]"
+            echo "A fake OpenCode CLI for testing aegis sandbox."
+            exit 0
+            ;;
+    esac
+done
+
+echo "fake-opencode: running with args: $*"
+exit 0
