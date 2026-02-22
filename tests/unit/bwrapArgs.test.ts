@@ -28,6 +28,7 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
     hideHome: false,
     hidePaths: [],
     emptyDir: "",
+    homeEntries: [],
     ...overrides,
   };
 }
@@ -119,6 +120,12 @@ describe("buildBwrapArgs", () => {
       const result = buildBwrapArgs(makeOpts());
       Result.assertOk(result);
       expect(containsSequence(result.value, ["--tmpfs", "/tmp"])).toBe(true);
+    });
+
+    test("always includes --tmpfs $HOME even without hide-home", () => {
+      const result = buildBwrapArgs(makeOpts({ hideHome: false }));
+      Result.assertOk(result);
+      expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(true);
     });
   });
 
@@ -570,6 +577,127 @@ describe("buildBwrapArgs", () => {
     });
   });
 
+  describe("non-hideHome with homeEntries", () => {
+    test("includes --tmpfs $HOME even without hide-home", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [".bashrc", ".config"],
+      }));
+      Result.assertOk(result);
+      expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(true);
+    });
+
+    test("includes --ro-bind for each homeEntry", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [".bashrc", ".config", ".gitconfig"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"])).toBe(true);
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.config", "/home/user/.config"])).toBe(true);
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.gitconfig", "/home/user/.gitconfig"])).toBe(true);
+    });
+
+    test("ro-binds come after --tmpfs $HOME and before RW binds", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [".bashrc", ".claude", ".claude.json"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      const tmpfsHomeIdx = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+      const roBashrcIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"]);
+      const rwClaudeIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude", "/home/user/.claude"]);
+
+      expect(tmpfsHomeIdx).not.toBe(-1);
+      expect(roBashrcIdx).not.toBe(-1);
+      expect(rwClaudeIdx).not.toBe(-1);
+      expect(roBashrcIdx).toBeGreaterThan(tmpfsHomeIdx);
+      expect(rwClaudeIdx).toBeGreaterThan(roBashrcIdx);
+    });
+
+    test("RW binds for rwPaths come after ro-binds (override RO with RW)", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [".claude", ".claude.json", ".npmrc"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // ro-bind for .claude (from homeEntries)
+      const roClaudeIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude", "/home/user/.claude"]);
+      // RW bind for .claude (from rwPaths)
+      const rwClaudeIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude", "/home/user/.claude"]);
+
+      expect(roClaudeIdx).not.toBe(-1);
+      expect(rwClaudeIdx).not.toBe(-1);
+      expect(rwClaudeIdx).toBeGreaterThan(roClaudeIdx);
+    });
+
+    test("homeEntries that match rwPaths are ro-bound then overridden with --bind", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [".claude", ".claude.json"],
+        cliDef: findCli("cc"),
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // .claude.json should appear as both --ro-bind and --bind
+      const roJsonIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
+      const rwJsonIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
+
+      expect(roJsonIdx).not.toBe(-1);
+      expect(rwJsonIdx).not.toBe(-1);
+      expect(rwJsonIdx).toBeGreaterThan(roJsonIdx);
+    });
+
+    test("homeEntries are deterministic (sorted order)", () => {
+      const entries = [".zshrc", ".bashrc", ".config", ".aws"];
+      const result1 = buildBwrapArgs(makeOpts({ hideHome: false, homeEntries: entries }));
+      const result2 = buildBwrapArgs(makeOpts({ hideHome: false, homeEntries: entries }));
+
+      Result.assertOk(result1);
+      Result.assertOk(result2);
+      expect(result1.value).toEqual(result2.value);
+    });
+
+    test("empty homeEntries produces no ro-binds for home entries", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: false,
+        homeEntries: [],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // Should still have --tmpfs $HOME
+      expect(containsSequence(args, ["--tmpfs", "/home/user"])).toBe(true);
+
+      // Should not have any --ro-bind for home entries (only --ro-bind / / and hide overlays)
+      let homeRoBindCount = 0;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--ro-bind" && args[i + 1]!.startsWith("/home/user/.")) {
+          homeRoBindCount++;
+        }
+      }
+      expect(homeRoBindCount).toBe(0);
+    });
+
+    test("hideHome mode does not produce ro-binds for homeEntries", () => {
+      const result = buildBwrapArgs(makeOpts({
+        hideHome: true,
+        homeEntries: [".bashrc", ".config"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // Should NOT have ro-bind for .bashrc (hideHome uses --dir/--ro-bind /dev/null instead)
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"])).toBe(false);
+    });
+  });
+
   describe("hide paths (overlays)", () => {
     test("includes ro-bind for each hide path", () => {
       const opts = makeOpts({
@@ -819,6 +947,85 @@ describe("buildBwrapArgs", () => {
       expect(roBindRoot).not.toBe(-1);
       expect(devIdx).toBeGreaterThan(roBindRoot);
       expect(procIdx).toBeGreaterThan(roBindRoot);
+    });
+
+    test("--tmpfs $HOME comes after --ro-bind / /", () => {
+      const result = buildBwrapArgs(makeOpts({
+        homeEntries: [".bashrc"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      const roBindRoot = findSequenceIndex(args, ["--ro-bind", "/", "/"]);
+      const tmpfsHome = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+
+      expect(roBindRoot).not.toBe(-1);
+      expect(tmpfsHome).not.toBe(-1);
+      expect(tmpfsHome).toBeGreaterThan(roBindRoot);
+    });
+
+    test("homeEntry ro-binds come after --tmpfs $HOME", () => {
+      const result = buildBwrapArgs(makeOpts({
+        homeEntries: [".bashrc", ".config"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      const tmpfsHome = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+      const roBashrc = findSequenceIndex(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"]);
+
+      expect(tmpfsHome).not.toBe(-1);
+      expect(roBashrc).not.toBe(-1);
+      expect(roBashrc).toBeGreaterThan(tmpfsHome);
+    });
+
+    test("RW binds come after homeEntry ro-binds", () => {
+      const result = buildBwrapArgs(makeOpts({
+        homeEntries: [".bashrc", ".claude", ".claude.json"],
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // Find the last homeEntry ro-bind
+      const roClaudeJson = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
+
+      // Find the first RW --bind
+      let firstBind = -1;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--bind") {
+          firstBind = i;
+          break;
+        }
+      }
+
+      expect(roClaudeJson).not.toBe(-1);
+      expect(firstBind).not.toBe(-1);
+      expect(firstBind).toBeGreaterThan(roClaudeJson);
+    });
+
+    test("hide overlays come after all RW binds (with homeEntries)", () => {
+      const result = buildBwrapArgs(makeOpts({
+        homeEntries: [".bashrc", ".claude", ".claude.json"],
+        hidePaths: ["/secret"],
+        emptyDir: "/tmp/empty",
+      }));
+      Result.assertOk(result);
+      const args = result.value;
+
+      // Find the last --bind
+      let lastBind = -1;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--bind") {
+          lastBind = i;
+        }
+      }
+
+      // Find the hide overlay
+      const hideIdx = findSequenceIndex(args, ["--ro-bind", "/tmp/empty", "/secret"]);
+
+      expect(lastBind).not.toBe(-1);
+      expect(hideIdx).not.toBe(-1);
+      expect(hideIdx).toBeGreaterThan(lastBind);
     });
 
     test("argv is deterministic for same inputs", () => {

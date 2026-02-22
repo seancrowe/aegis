@@ -4,6 +4,7 @@
  */
 import { Command } from "commander";
 import { join } from "node:path";
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig, validateHidePaths, expandHidePaths } from "./config/config";
 import { filterAegisFlags, normalizeToolArgs } from "./tools/tool";
@@ -97,7 +98,13 @@ async function main() {
           process.exit(1);
         }
 
-        // 7. Create empty overlay dir for hide paths + register cleanup
+        // 7. Enumerate home directory entries for RO re-binds
+        const homeEntries = readdirSync(home, { withFileTypes: true })
+          .filter(e => e.isFile() || e.isDirectory() || e.isSymbolicLink())
+          .map(e => e.name)
+          .sort();
+
+        // 8. Create empty overlay dir for hide paths + register cleanup
         let emptyDir = "";
         if (allHidePaths.length > 0) {
           emptyDir = await createEmptyOverlayDir();
@@ -107,7 +114,7 @@ async function main() {
           }
         }
 
-        // 8. Build bwrap options
+        // 9. Build bwrap options
         const bwrapOpts = {
           cwd: process.cwd(),
           home,
@@ -117,9 +124,10 @@ async function main() {
           hideHome,
           hidePaths: allHidePaths,
           emptyDir,
+          homeEntries,
         };
 
-        // 9. Build command once, then dry-run or execute
+        // 10. Build command once, then dry-run or execute
         const cmdResult = buildBwrapCommand(bwrapOpts);
         if (!cmdResult.ok) {
           process.stderr.write(cmdResult.error.message + "\n");

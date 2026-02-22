@@ -332,6 +332,106 @@ describe("dry-run bwrap base flags", () => {
   });
 });
 
+describe("dry-run non-hideHome tmpfs and ro-binds", () => {
+  let tempDir: string;
+  let tempHome: string;
+  let tempProject: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "aegis-dryrun-"));
+    tempHome = join(tempDir, "home");
+    tempProject = join(tempDir, "project");
+    await mkdir(tempHome, { recursive: true });
+    await mkdir(tempProject, { recursive: true });
+    await mkdir(join(tempHome, ".claude"), { recursive: true });
+    await writeFile(join(tempHome, ".claude.json"), "{}");
+    // Add extra dotfiles to verify ro-bind
+    await writeFile(join(tempHome, ".bashrc"), "# bashrc");
+    await mkdir(join(tempHome, ".config"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("non-hideHome includes --tmpfs for HOME", async () => {
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    const args = output?.args ?? [];
+    let foundHomeTmpfs = false;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "--tmpfs" && args[i + 1] === tempHome) {
+        foundHomeTmpfs = true;
+        break;
+      }
+    }
+    expect(foundHomeTmpfs).toBe(true);
+  });
+
+  test("non-hideHome includes ro-bind for home entries", async () => {
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    const args = output?.args ?? [];
+
+    // .bashrc and .config should be ro-bound
+    const bashrcRoBind = args.some((a, i) =>
+      a === "--ro-bind" &&
+      args[i + 1] === join(tempHome, ".bashrc") &&
+      args[i + 2] === join(tempHome, ".bashrc")
+    );
+    const configRoBind = args.some((a, i) =>
+      a === "--ro-bind" &&
+      args[i + 1] === join(tempHome, ".config") &&
+      args[i + 2] === join(tempHome, ".config")
+    );
+
+    expect(bashrcRoBind).toBe(true);
+    expect(configRoBind).toBe(true);
+  });
+
+  test("non-hideHome RW binds override ro-binds for rwPaths", async () => {
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    const args = output?.args ?? [];
+
+    // .claude should appear as both --ro-bind (from homeEntries) and --bind (RW from rwPaths)
+    const claudeRoBind = args.some((a, i) =>
+      a === "--ro-bind" &&
+      args[i + 1] === join(tempHome, ".claude") &&
+      args[i + 2] === join(tempHome, ".claude")
+    );
+    const claudeRwBind = args.some((a, i) =>
+      a === "--bind" &&
+      args[i + 1] === join(tempHome, ".claude") &&
+      args[i + 2] === join(tempHome, ".claude")
+    );
+
+    expect(claudeRoBind).toBe(true);
+    expect(claudeRwBind).toBe(true);
+  });
+});
+
 describe("dry-run --hide-home mode", () => {
   let tempDir: string;
   let tempHome: string;

@@ -26,6 +26,8 @@ export interface BwrapOptions {
   hidePaths: string[];
   /** Empty directory for overlay mounts */
   emptyDir: string;
+  /** Top-level entries in $HOME (basenames). Used for RO re-binds in non-hideHome mode. */
+  homeEntries: string[];
 }
 
 export interface BwrapCommand {
@@ -48,9 +50,11 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
   args.push("--dev", "/dev");
   args.push("--proc", "/proc");
 
-  // 2. Hide-home: tmpfs over $HOME, then create mountpoints (before --tmpfs /tmp)
+  // 2. Always overlay $HOME with writable tmpfs
+  args.push("--tmpfs", opts.home);
+
   if (opts.hideHome) {
-    args.push("--tmpfs", opts.home);
+    // Hide-home: create mountpoints for rwPaths only (existing behavior)
     for (const rp of opts.cliDef.rwPaths) {
       const fullPath = join(opts.home, rp.path);
       if (rp.kind === "dir") {
@@ -58,6 +62,13 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
       } else {
         args.push("--ro-bind", "/dev/null", fullPath);
       }
+    }
+  } else {
+    // Non-hideHome: re-bind all existing home entries as read-only.
+    // rwPaths will be overridden with --bind (RW) later.
+    for (const entry of opts.homeEntries) {
+      const fullPath = join(opts.home, entry);
+      args.push("--ro-bind", fullPath, fullPath);
     }
   }
 
