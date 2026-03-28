@@ -332,7 +332,7 @@ describe("dry-run bwrap base flags", () => {
   });
 });
 
-describe("dry-run non-hideHome tmpfs and ro-binds", () => {
+describe("dry-run non-hideHome bind and ro-binds", () => {
   let tempDir: string;
   let tempHome: string;
   let tempProject: string;
@@ -354,7 +354,7 @@ describe("dry-run non-hideHome tmpfs and ro-binds", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("non-hideHome includes --tmpfs for HOME", async () => {
+  test("non-hideHome includes --bind for HOME", async () => {
     const { output, exitCode } = await runAegisDryRun(
       "cc",
       ["--version"],
@@ -365,14 +365,14 @@ describe("dry-run non-hideHome tmpfs and ro-binds", () => {
 
     expect(exitCode).toBe(0);
     const args = output?.args ?? [];
-    let foundHomeTmpfs = false;
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] === "--tmpfs" && args[i + 1] === tempHome) {
-        foundHomeTmpfs = true;
+    let foundHomeBind = false;
+    for (let i = 0; i < args.length - 2; i++) {
+      if (args[i] === "--bind" && args[i + 1] === tempHome && args[i + 2] === tempHome) {
+        foundHomeBind = true;
         break;
       }
     }
-    expect(foundHomeTmpfs).toBe(true);
+    expect(foundHomeBind).toBe(true);
   });
 
   test("non-hideHome includes ro-bind for home entries", async () => {
@@ -403,7 +403,7 @@ describe("dry-run non-hideHome tmpfs and ro-binds", () => {
     expect(configRoBind).toBe(true);
   });
 
-  test("non-hideHome RW binds override ro-binds for rwPaths", async () => {
+  test("non-hideHome: dir rwPaths are ro-bound then overridden; file rwPaths are neither", async () => {
     const { output, exitCode } = await runAegisDryRun(
       "cc",
       ["--version"],
@@ -415,7 +415,7 @@ describe("dry-run non-hideHome tmpfs and ro-binds", () => {
     expect(exitCode).toBe(0);
     const args = output?.args ?? [];
 
-    // .claude should appear as both --ro-bind (from homeEntries) and --bind (RW from rwPaths)
+    // .claude dir should appear as both --ro-bind (from homeEntries) and --bind (RW from rwPaths)
     const claudeRoBind = args.some((a, i) =>
       a === "--ro-bind" &&
       args[i + 1] === join(tempHome, ".claude") &&
@@ -429,6 +429,22 @@ describe("dry-run non-hideHome tmpfs and ro-binds", () => {
 
     expect(claudeRoBind).toBe(true);
     expect(claudeRwBind).toBe(true);
+
+    // .claude.json (file rwPath, direct child) should NOT be individually bound or ro-bound
+    // — it stays writable as part of --bind $HOME to enable atomic writes
+    const claudeJsonBind = args.some((a, i) =>
+      a === "--bind" &&
+      args[i + 1] === join(tempHome, ".claude.json") &&
+      args[i + 2] === join(tempHome, ".claude.json")
+    );
+    const claudeJsonRoBind = args.some((a, i) =>
+      a === "--ro-bind" &&
+      args[i + 1] === join(tempHome, ".claude.json") &&
+      args[i + 2] === join(tempHome, ".claude.json")
+    );
+
+    expect(claudeJsonBind).toBe(false);
+    expect(claudeJsonRoBind).toBe(false);
   });
 });
 

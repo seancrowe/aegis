@@ -122,10 +122,10 @@ describe("buildBwrapArgs", () => {
       expect(containsSequence(result.value, ["--tmpfs", "/tmp"])).toBe(true);
     });
 
-    test("always includes --tmpfs $HOME even without hide-home", () => {
+    test("includes --bind $HOME $HOME without hide-home", () => {
       const result = buildBwrapArgs(makeOpts({ hideHome: false }));
       Result.assertOk(result);
-      expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(true);
+      expect(containsSequence(result.value, ["--bind", "/home/user", "/home/user"])).toBe(true);
     });
   });
 
@@ -154,14 +154,14 @@ describe("buildBwrapArgs", () => {
   });
 
   describe("tool config/auth paths (no hide-home)", () => {
-    test("includes RW binds for claude config paths", () => {
+    test("includes RW bind for claude dir but not file rwPaths", () => {
       const opts = makeOpts({
         cliDef: findCli("cc"),
         home: "/home/user",
       });
       const result = buildBwrapArgs(opts);
       Result.assertOk(result);
-      // Should bind .claude directory
+      // Should bind .claude directory (dir rwPath)
       expect(
         containsSequence(result.value, [
           "--bind",
@@ -169,14 +169,15 @@ describe("buildBwrapArgs", () => {
           "/home/user/.claude",
         ])
       ).toBe(true);
-      // Should bind .claude.json file
+      // Should NOT individually bind .claude.json (file rwPath, direct child)
+      // — it stays writable as part of --bind $HOME to enable atomic writes
       expect(
         containsSequence(result.value, [
           "--bind",
           "/home/user/.claude.json",
           "/home/user/.claude.json",
         ])
-      ).toBe(true);
+      ).toBe(false);
     });
 
     test("includes RW binds for codex config paths", () => {
@@ -578,13 +579,13 @@ describe("buildBwrapArgs", () => {
   });
 
   describe("non-hideHome with homeEntries", () => {
-    test("includes --tmpfs $HOME even without hide-home", () => {
+    test("includes --bind $HOME $HOME without hide-home", () => {
       const result = buildBwrapArgs(makeOpts({
         hideHome: false,
         homeEntries: [".bashrc", ".config"],
       }));
       Result.assertOk(result);
-      expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(true);
+      expect(containsSequence(result.value, ["--bind", "/home/user", "/home/user"])).toBe(true);
     });
 
     test("includes --ro-bind for each homeEntry", () => {
@@ -599,7 +600,7 @@ describe("buildBwrapArgs", () => {
       expect(containsSequence(args, ["--ro-bind", "/home/user/.gitconfig", "/home/user/.gitconfig"])).toBe(true);
     });
 
-    test("ro-binds come after --tmpfs $HOME and before RW binds", () => {
+    test("ro-binds come after --bind $HOME and before RW binds", () => {
       const result = buildBwrapArgs(makeOpts({
         hideHome: false,
         homeEntries: [".bashrc", ".claude", ".claude.json"],
@@ -607,18 +608,18 @@ describe("buildBwrapArgs", () => {
       Result.assertOk(result);
       const args = result.value;
 
-      const tmpfsHomeIdx = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+      const bindHomeIdx = findSequenceIndex(args, ["--bind", "/home/user", "/home/user"]);
       const roBashrcIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"]);
       const rwClaudeIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude", "/home/user/.claude"]);
 
-      expect(tmpfsHomeIdx).not.toBe(-1);
+      expect(bindHomeIdx).not.toBe(-1);
       expect(roBashrcIdx).not.toBe(-1);
       expect(rwClaudeIdx).not.toBe(-1);
-      expect(roBashrcIdx).toBeGreaterThan(tmpfsHomeIdx);
+      expect(roBashrcIdx).toBeGreaterThan(bindHomeIdx);
       expect(rwClaudeIdx).toBeGreaterThan(roBashrcIdx);
     });
 
-    test("RW binds for rwPaths come after ro-binds (override RO with RW)", () => {
+    test("RW binds for dir rwPaths come after ro-binds (override RO with RW)", () => {
       const result = buildBwrapArgs(makeOpts({
         hideHome: false,
         homeEntries: [".claude", ".claude.json", ".npmrc"],
@@ -626,17 +627,22 @@ describe("buildBwrapArgs", () => {
       Result.assertOk(result);
       const args = result.value;
 
-      // ro-bind for .claude (from homeEntries)
+      // ro-bind for .claude (from homeEntries — dir rwPath is still ro-bound)
       const roClaudeIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude", "/home/user/.claude"]);
-      // RW bind for .claude (from rwPaths)
+      // RW bind for .claude (from rwPaths — dir rwPath gets individual --bind)
       const rwClaudeIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude", "/home/user/.claude"]);
 
       expect(roClaudeIdx).not.toBe(-1);
       expect(rwClaudeIdx).not.toBe(-1);
       expect(rwClaudeIdx).toBeGreaterThan(roClaudeIdx);
+
+      // .claude.json (file rwPath, direct child) should NOT be individually bound
+      expect(containsSequence(args, ["--bind", "/home/user/.claude.json", "/home/user/.claude.json"])).toBe(false);
+      // .claude.json should also NOT be ro-bound (excluded from ro-bind overlay)
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"])).toBe(false);
     });
 
-    test("homeEntries that match rwPaths are ro-bound then overridden with --bind", () => {
+    test("dir rwPaths in homeEntries are ro-bound then overridden; file rwPaths are neither", () => {
       const result = buildBwrapArgs(makeOpts({
         hideHome: false,
         homeEntries: [".claude", ".claude.json"],
@@ -645,13 +651,17 @@ describe("buildBwrapArgs", () => {
       Result.assertOk(result);
       const args = result.value;
 
-      // .claude.json should appear as both --ro-bind and --bind
-      const roJsonIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
-      const rwJsonIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
+      // .claude (dir rwPath) should appear as --ro-bind (from homeEntries) then --bind (from rwPaths)
+      const roClaudeIdx = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude", "/home/user/.claude"]);
+      const rwClaudeIdx = findSequenceIndex(args, ["--bind", "/home/user/.claude", "/home/user/.claude"]);
+      expect(roClaudeIdx).not.toBe(-1);
+      expect(rwClaudeIdx).not.toBe(-1);
+      expect(rwClaudeIdx).toBeGreaterThan(roClaudeIdx);
 
-      expect(roJsonIdx).not.toBe(-1);
-      expect(rwJsonIdx).not.toBe(-1);
-      expect(rwJsonIdx).toBeGreaterThan(roJsonIdx);
+      // .claude.json (file rwPath, direct child) should NOT appear as --ro-bind or --bind
+      // It stays writable as part of --bind $HOME to enable atomic writes
+      expect(containsSequence(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"])).toBe(false);
+      expect(containsSequence(args, ["--bind", "/home/user/.claude.json", "/home/user/.claude.json"])).toBe(false);
     });
 
     test("homeEntries are deterministic (sorted order)", () => {
@@ -672,8 +682,8 @@ describe("buildBwrapArgs", () => {
       Result.assertOk(result);
       const args = result.value;
 
-      // Should still have --tmpfs $HOME
-      expect(containsSequence(args, ["--tmpfs", "/home/user"])).toBe(true);
+      // Should have --bind $HOME $HOME
+      expect(containsSequence(args, ["--bind", "/home/user", "/home/user"])).toBe(true);
 
       // Should not have any --ro-bind for home entries (only --ro-bind / / and hide overlays)
       let homeRoBindCount = 0;
@@ -949,7 +959,7 @@ describe("buildBwrapArgs", () => {
       expect(procIdx).toBeGreaterThan(roBindRoot);
     });
 
-    test("--tmpfs $HOME comes after --ro-bind / /", () => {
+    test("--bind $HOME comes after --ro-bind / / (non-hideHome)", () => {
       const result = buildBwrapArgs(makeOpts({
         homeEntries: [".bashrc"],
       }));
@@ -957,50 +967,51 @@ describe("buildBwrapArgs", () => {
       const args = result.value;
 
       const roBindRoot = findSequenceIndex(args, ["--ro-bind", "/", "/"]);
-      const tmpfsHome = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+      const bindHome = findSequenceIndex(args, ["--bind", "/home/user", "/home/user"]);
 
       expect(roBindRoot).not.toBe(-1);
-      expect(tmpfsHome).not.toBe(-1);
-      expect(tmpfsHome).toBeGreaterThan(roBindRoot);
+      expect(bindHome).not.toBe(-1);
+      expect(bindHome).toBeGreaterThan(roBindRoot);
     });
 
-    test("homeEntry ro-binds come after --tmpfs $HOME", () => {
+    test("homeEntry ro-binds come after --bind $HOME", () => {
       const result = buildBwrapArgs(makeOpts({
         homeEntries: [".bashrc", ".config"],
       }));
       Result.assertOk(result);
       const args = result.value;
 
-      const tmpfsHome = findSequenceIndex(args, ["--tmpfs", "/home/user"]);
+      const bindHome = findSequenceIndex(args, ["--bind", "/home/user", "/home/user"]);
       const roBashrc = findSequenceIndex(args, ["--ro-bind", "/home/user/.bashrc", "/home/user/.bashrc"]);
 
-      expect(tmpfsHome).not.toBe(-1);
+      expect(bindHome).not.toBe(-1);
       expect(roBashrc).not.toBe(-1);
-      expect(roBashrc).toBeGreaterThan(tmpfsHome);
+      expect(roBashrc).toBeGreaterThan(bindHome);
     });
 
     test("RW binds come after homeEntry ro-binds", () => {
       const result = buildBwrapArgs(makeOpts({
-        homeEntries: [".bashrc", ".claude", ".claude.json"],
+        homeEntries: [".bashrc", ".claude"],
       }));
       Result.assertOk(result);
       const args = result.value;
 
-      // Find the last homeEntry ro-bind
-      const roClaudeJson = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude.json", "/home/user/.claude.json"]);
+      // Find the last homeEntry ro-bind (.claude is a dir rwPath, still ro-bound)
+      const roClaude = findSequenceIndex(args, ["--ro-bind", "/home/user/.claude", "/home/user/.claude"]);
 
-      // Find the first RW --bind
-      let firstBind = -1;
-      for (let i = 0; i < args.length - 2; i++) {
+      // Find the first RW --bind after --bind $HOME
+      const bindHome = findSequenceIndex(args, ["--bind", "/home/user", "/home/user"]);
+      let firstNonHomeBind = -1;
+      for (let i = bindHome + 3; i < args.length - 2; i++) {
         if (args[i] === "--bind") {
-          firstBind = i;
+          firstNonHomeBind = i;
           break;
         }
       }
 
-      expect(roClaudeJson).not.toBe(-1);
-      expect(firstBind).not.toBe(-1);
-      expect(firstBind).toBeGreaterThan(roClaudeJson);
+      expect(roClaude).not.toBe(-1);
+      expect(firstNonHomeBind).not.toBe(-1);
+      expect(firstNonHomeBind).toBeGreaterThan(roClaude);
     });
 
     test("hide overlays come after all RW binds (with homeEntries)", () => {

@@ -50,11 +50,10 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
   args.push("--dev", "/dev");
   args.push("--proc", "/proc");
 
-  // 2. Always overlay $HOME with writable tmpfs
-  args.push("--tmpfs", opts.home);
-
+  // 2. Home directory mounts
   if (opts.hideHome) {
-    // Hide-home: create mountpoints for rwPaths only (existing behavior)
+    // Hide-home: tmpfs over $HOME, then create mountpoints (unchanged)
+    args.push("--tmpfs", opts.home);
     for (const rp of opts.cliDef.rwPaths) {
       const fullPath = join(opts.home, rp.path);
       if (rp.kind === "dir") {
@@ -64,11 +63,22 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
       }
     }
   } else {
-    // Non-hideHome: re-bind all existing home entries as read-only.
-    // rwPaths will be overridden with --bind (RW) later.
+    // Non-hideHome: bind $HOME as RW, selectively protect entries as RO.
+    // File rwPaths (direct children) are NOT overlaid — they stay writable
+    // as part of the $HOME bind, enabling atomic writes (temp+rename).
+    args.push("--bind", opts.home, opts.home);
+
+    const fileRwBasenames = new Set(
+      opts.cliDef.rwPaths
+        .filter(rp => rp.kind === "file" && !rp.path.includes("/"))
+        .map(rp => rp.path)
+    );
+
     for (const entry of opts.homeEntries) {
-      const fullPath = join(opts.home, entry);
-      args.push("--ro-bind", fullPath, fullPath);
+      if (!fileRwBasenames.has(entry)) {
+        const fullPath = join(opts.home, entry);
+        args.push("--ro-bind", fullPath, fullPath);
+      }
     }
   }
 
@@ -77,6 +87,12 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
   // 3. RW binds — cwd + tool config paths
   args.push("--bind", opts.cwd, opts.cwd);
   for (const rp of opts.cliDef.rwPaths) {
+    // In non-hideHome mode, direct-child file rwPaths are already writable
+    // from --bind $HOME; binding them individually would create mount points
+    // that break atomic writes (temp+rename).
+    if (!opts.hideHome && rp.kind === "file" && !rp.path.includes("/")) {
+      continue;
+    }
     const fullPath = join(opts.home, rp.path);
     args.push("--bind", fullPath, fullPath);
   }
