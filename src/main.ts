@@ -57,9 +57,9 @@ async function main() {
       .option("--dry-run", "Print bwrap command as JSON without executing")
       .argument("[args...]", "Arguments to pass to the tool")
       .action(async (_passedArgs: string[], options: SubCmdOpts) => {
-        // 1. Resolve tool path
-        const toolPath = Bun.which(cliDef.cliCmd);
-        if (!toolPath) {
+        // 1. Resolve tool path (skip for dry-run since nothing is executed)
+        const toolPath = Bun.which(cliDef.cliCmd) ?? cliDef.cliCmd;
+        if (!options.dryRun && toolPath === cliDef.cliCmd) {
           process.stderr.write(`${cliDef.cliCmd} not found in PATH\n`);
           process.exit(1);
         }
