@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig, validateHidePaths, expandHidePaths } from "./config/config";
+import { loadProjectOverrides, resolveOverrides } from "./config/overrides";
 import { filterAegisFlags, normalizeToolArgs } from "./tools/tool";
 import {
   buildBwrapCommand,
@@ -104,9 +105,23 @@ async function main() {
           .map(e => e.name)
           .sort();
 
-        // 8. Create empty overlay dir for hide paths + register cleanup
+        // 8. Load project overrides (.aegis.json)
+        const cwd = process.cwd();
+        const projResult = await loadProjectOverrides(cwd);
+        if (!projResult.ok) {
+          process.stderr.write(projResult.error.message + "\n");
+          process.exit(1);
+        }
+        const projectEntries = projResult.value ?? [];
+        const configCwdOverrides = config.cwdOverrides;
+
+        // 9. Create empty overlay dir if needed + register cleanup
         let emptyDir = "";
-        if (allHidePaths.length > 0) {
+        const needsEmptyDir =
+          allHidePaths.length > 0 ||
+          configCwdOverrides.length > 0 ||
+          projectEntries.length > 0;
+        if (needsEmptyDir) {
           emptyDir = await createEmptyOverlayDir();
           process.on("exit", () => removeOverlayDir(emptyDir));
           for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -114,9 +129,17 @@ async function main() {
           }
         }
 
-        // 9. Build bwrap options
+        // 10. Resolve CWD overrides
+        const resolvedCwdOverrides = resolveOverrides(
+          configCwdOverrides, cwd, home, emptyDir
+        );
+        const resolvedProjectOverrides = resolveOverrides(
+          projectEntries, cwd, home, emptyDir
+        );
+
+        // 11. Build bwrap options
         const bwrapOpts = {
-          cwd: process.cwd(),
+          cwd,
           home,
           cliDef,
           toolPath,
@@ -125,9 +148,11 @@ async function main() {
           hidePaths: allHidePaths,
           emptyDir,
           homeEntries,
+          cwdOverrides: resolvedCwdOverrides,
+          projectOverrides: resolvedProjectOverrides,
         };
 
-        // 10. Build command once, then dry-run or execute
+        // 12. Build command once, then dry-run or execute
         const cmdResult = buildBwrapCommand(bwrapOpts);
         if (!cmdResult.ok) {
           process.stderr.write(cmdResult.error.message + "\n");

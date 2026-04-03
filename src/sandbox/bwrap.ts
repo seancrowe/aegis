@@ -8,6 +8,7 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import type { CliDef } from "../types";
+import type { ResolvedOverride } from "../config/overrides";
 
 export interface BwrapOptions {
   /** Current working directory */
@@ -28,6 +29,10 @@ export interface BwrapOptions {
   emptyDir: string;
   /** Top-level entries in $HOME (basenames). Used for RO re-binds in non-hideHome mode. */
   homeEntries: string[];
+  /** CWD overrides from global config, resolved against CWD. */
+  cwdOverrides: ResolvedOverride[];
+  /** Project overrides from .aegis.json, resolved against CWD. */
+  projectOverrides: ResolvedOverride[];
 }
 
 export interface BwrapCommand {
@@ -103,6 +108,16 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
   // 5. Hide overlays — MUST come after all --bind ops
   for (const hidePath of opts.hidePaths) {
     args.push("--ro-bind", opts.emptyDir, hidePath);
+  }
+
+  // 5b. CWD overrides (global config, resolved against CWD)
+  for (const ov of opts.cwdOverrides) {
+    args.push("--ro-bind", ov.source, ov.target);
+  }
+
+  // 5c. Project overrides (.aegis.json — highest precedence)
+  for (const ov of opts.projectOverrides) {
+    args.push("--ro-bind", ov.source, ov.target);
   }
 
   // 6. Tool execution

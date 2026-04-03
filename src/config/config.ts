@@ -8,11 +8,15 @@ import { join, dirname, normalize } from "node:path";
 import type { CliDef, RwPath } from "../types";
 import { assertDirectory } from "../fs/paths";
 import envPaths from "../util/envPaths";
+import type { OverrideEntry } from "./overrides";
+import { validateOverrideEntries } from "./overrides";
 
 export interface AegisConfig {
   hideHomeAlways: boolean;
   /** Paths to hide in the sandbox. Supports ~ for home directory. */
   hide: string[];
+  /** CWD-relative bind overrides applied globally to every project. */
+  cwdOverrides: OverrideEntry[];
   clis: CliDef[];
 }
 
@@ -114,6 +118,7 @@ export function defaultConfig(): AegisConfig {
   return {
     hideHomeAlways: false,
     hide: defaultHidePaths(),
+    cwdOverrides: [],
     clis: defaultCliDefs(),
   };
 }
@@ -154,6 +159,14 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
     if (typeof item !== "string") {
       return Result.error(new Error("Invalid entry in hide: expected string"));
     }
+  }
+
+  // Validate cwdOverrides (optional, default to [])
+  let cwdOverrides: OverrideEntry[] = [];
+  if (obj.cwdOverrides !== undefined) {
+    const ovResult = validateOverrideEntries(obj.cwdOverrides);
+    if (!ovResult.ok) return Result.error(ovResult.error);
+    cwdOverrides = ovResult.value;
   }
 
   // Validate clis (optional, backfill with defaults)
@@ -210,6 +223,7 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
   return Result.ok({
     hideHomeAlways: obj.hideHomeAlways as boolean,
     hide: obj.hide as string[],
+    cwdOverrides,
     clis,
   });
 }

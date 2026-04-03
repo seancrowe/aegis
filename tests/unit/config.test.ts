@@ -26,6 +26,7 @@ describe("defaultConfig", () => {
     expect(config.hideHomeAlways).toBe(false);
     expect(config.hide).toEqual(defaultHidePaths());
     expect(config.hide.length).toBeGreaterThan(0);
+    expect(config.cwdOverrides).toEqual([]);
     expect(config.clis).toEqual(defaultCliDefs());
     expect(config.clis.length).toBe(6);
   });
@@ -72,6 +73,7 @@ describe("serializeConfig", () => {
     const config: AegisConfig = {
       hideHomeAlways: true,
       hide: ["/path/one", "/path/two"],
+      cwdOverrides: [],
       clis: defaultCliDefs(),
     };
     const json = serializeConfig(config);
@@ -317,6 +319,75 @@ describe("parseConfig - clis validation", () => {
   });
 });
 
+describe("parseConfig - cwdOverrides", () => {
+  test("defaults to empty array when cwdOverrides is absent", () => {
+    const json = JSON.stringify({ hideHomeAlways: false, hide: [] });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.cwdOverrides).toEqual([]);
+  });
+
+  test("parses valid cwdOverrides", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [
+        { target: ".env" },
+        { target: ".npmrc", override: "~/.config/aegis/sandbox-npmrc" },
+      ],
+    });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.cwdOverrides.length).toBe(2);
+    expect(result.value.cwdOverrides[0]).toEqual({ target: ".env" });
+    expect(result.value.cwdOverrides[1]).toEqual({
+      target: ".npmrc",
+      override: "~/.config/aegis/sandbox-npmrc",
+    });
+  });
+
+  test("accepts empty cwdOverrides array", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [],
+    });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.cwdOverrides).toEqual([]);
+  });
+
+  test("fails on non-array cwdOverrides", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: "not an array",
+    });
+    const result = parseConfig(json);
+    Result.assertError(result);
+  });
+
+  test("fails on cwdOverrides entry with empty target", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [{ target: "" }],
+    });
+    const result = parseConfig(json);
+    Result.assertError(result);
+  });
+
+  test("fails on cwdOverrides entry with non-string override", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [{ target: ".env", override: 42 }],
+    });
+    const result = parseConfig(json);
+    Result.assertError(result);
+  });
+});
+
 describe("validateHidePaths", () => {
   let tempDir: string;
 
@@ -420,6 +491,7 @@ describe("loadConfig", () => {
     const customConfig: AegisConfig = {
       hideHomeAlways: true,
       hide: ["/some/path"],
+      cwdOverrides: [],
       clis: defaultCliDefs(),
     };
     await writeFile(configPath, JSON.stringify(customConfig));

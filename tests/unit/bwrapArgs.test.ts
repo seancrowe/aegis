@@ -29,6 +29,8 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
     hidePaths: [],
     emptyDir: "",
     homeEntries: [],
+    cwdOverrides: [],
+    projectOverrides: [],
     ...overrides,
   };
 }
@@ -884,6 +886,113 @@ describe("buildBwrapArgs", () => {
         expect(hideIdx).not.toBe(-1);
         expect(hideIdx).toBeGreaterThan(lastBindIdx);
       }
+    });
+  });
+
+  describe("CWD and project overrides", () => {
+    test("cwdOverrides produce --ro-bind args", () => {
+      const opts = makeOpts({
+        cwdOverrides: [
+          { target: "/home/user/project/.env", source: "/dev/null", kind: "file" },
+        ],
+      });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      const args = result.value;
+      expect(containsSequence(args, ["--ro-bind", "/dev/null", "/home/user/project/.env"])).toBe(true);
+    });
+
+    test("projectOverrides produce --ro-bind args", () => {
+      const opts = makeOpts({
+        projectOverrides: [
+          { target: "/home/user/project/secrets", source: "/tmp/empty", kind: "dir" },
+        ],
+      });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      const args = result.value;
+      expect(containsSequence(args, ["--ro-bind", "/tmp/empty", "/home/user/project/secrets"])).toBe(true);
+    });
+
+    test("projectOverrides come after cwdOverrides (higher precedence)", () => {
+      const opts = makeOpts({
+        cwdOverrides: [
+          { target: "/home/user/project/.env", source: "/dev/null", kind: "file" },
+        ],
+        projectOverrides: [
+          { target: "/home/user/project/.env", source: "/home/user/project/.env.sandbox", kind: "file" },
+        ],
+      });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      const args = result.value;
+
+      // Find the two --ro-bind entries for .env
+      let cwdIdx = -1;
+      let projIdx = -1;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--ro-bind" && args[i + 2] === "/home/user/project/.env") {
+          if (args[i + 1] === "/dev/null") cwdIdx = i;
+          if (args[i + 1] === "/home/user/project/.env.sandbox") projIdx = i;
+        }
+      }
+      expect(cwdIdx).not.toBe(-1);
+      expect(projIdx).not.toBe(-1);
+      expect(projIdx).toBeGreaterThan(cwdIdx);
+    });
+
+    test("overrides come after hide overlays", () => {
+      const opts = makeOpts({
+        hidePaths: ["/home/user/.ssh"],
+        emptyDir: "/tmp/aegis-empty",
+        cwdOverrides: [
+          { target: "/home/user/project/.env", source: "/dev/null", kind: "file" },
+        ],
+      });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      const args = result.value;
+
+      let hideIdx = -1;
+      let overrideIdx = -1;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--ro-bind" && args[i + 2] === "/home/user/.ssh") hideIdx = i;
+        if (args[i] === "--ro-bind" && args[i + 2] === "/home/user/project/.env") overrideIdx = i;
+      }
+      expect(hideIdx).not.toBe(-1);
+      expect(overrideIdx).not.toBe(-1);
+      expect(overrideIdx).toBeGreaterThan(hideIdx);
+    });
+
+    test("overrides come before -- (tool execution)", () => {
+      const opts = makeOpts({
+        projectOverrides: [
+          { target: "/home/user/project/.env", source: "/dev/null", kind: "file" },
+        ],
+      });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      const args = result.value;
+
+      let overrideIdx = -1;
+      for (let i = 0; i < args.length - 2; i++) {
+        if (args[i] === "--ro-bind" && args[i + 2] === "/home/user/project/.env") {
+          overrideIdx = i;
+        }
+      }
+      const dashDashIdx = args.indexOf("--");
+      expect(overrideIdx).not.toBe(-1);
+      expect(overrideIdx).toBeLessThan(dashDashIdx);
+    });
+
+    test("empty override arrays produce no extra args", () => {
+      const opts = makeOpts({ cwdOverrides: [], projectOverrides: [] });
+      const baseline = makeOpts();
+      const result = buildBwrapArgs(opts);
+      const baselineResult = buildBwrapArgs(baseline);
+      Result.assertOk(result);
+      Result.assertOk(baselineResult);
+      expect(result.value).toEqual(baselineResult.value);
     });
   });
 
