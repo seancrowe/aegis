@@ -386,6 +386,39 @@ describe("parseConfig - cwdOverrides", () => {
     const result = parseConfig(json);
     Result.assertError(result);
   });
+
+  test("accepts string shorthand in cwdOverrides", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [".env", ".secrets"],
+    });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.cwdOverrides).toEqual([
+      { target: ".env" },
+      { target: ".secrets" },
+    ]);
+  });
+
+  test("accepts mixed strings and objects in cwdOverrides", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      cwdOverrides: [
+        ".env",
+        { target: ".npmrc", override: "~/.sandbox-npmrc" },
+      ],
+    });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.cwdOverrides.length).toBe(2);
+    expect(result.value.cwdOverrides[0]).toEqual({ target: ".env" });
+    expect(result.value.cwdOverrides[1]).toEqual({
+      target: ".npmrc",
+      override: "~/.sandbox-npmrc",
+    });
+  });
 });
 
 describe("validateHidePaths", () => {

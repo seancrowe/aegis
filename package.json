@@ -1,6 +1,6 @@
 {
   "name": "aegis",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "module": "src/main.ts",
   "type": "module",
   "private": true,
@@ -16,13 +16,13 @@
     "test:layer4": "bun run scripts/test.ts layer4"
   },
   "dependencies": {
-    "commander": "^12.1.0",
-    "typescript-result": "^3.5.2"
+    "commander": "14.0.3",
+    "typescript-result": "3.5.2"
   },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "6.0.2"
   }
 }

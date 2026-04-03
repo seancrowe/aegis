@@ -29,8 +29,20 @@ export function validateOverrideEntries(
   }
   const result: OverrideEntry[] = [];
   for (const entry of entries) {
+    // String shorthand: "foo" → { target: "foo" }
+    if (typeof entry === "string") {
+      if (entry.length === 0) {
+        return Result.error(
+          new Error("Override entry: target must be a non-empty string")
+        );
+      }
+      result.push({ target: entry });
+      continue;
+    }
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      return Result.error(new Error("Override entry must be an object"));
+      return Result.error(
+        new Error("Override entry must be a string or object")
+      );
     }
     const obj = entry as Record<string, unknown>;
     if (typeof obj.target !== "string" || obj.target.length === 0) {

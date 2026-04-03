@@ -57,11 +57,37 @@ describe("validateOverrideEntries", () => {
     Result.assertError(validateOverrideEntries(42));
   });
 
-  test("rejects entry that is not an object", () => {
-    Result.assertError(validateOverrideEntries(["string"]));
+  test("rejects entry that is not a string or object", () => {
     Result.assertError(validateOverrideEntries([42]));
     Result.assertError(validateOverrideEntries([null]));
     Result.assertError(validateOverrideEntries([[]]));
+    Result.assertError(validateOverrideEntries([true]));
+  });
+
+  test("accepts string shorthand as { target: string }", () => {
+    const result = validateOverrideEntries([".env"]);
+    Result.assertOk(result);
+    expect(result.value).toEqual([{ target: ".env" }]);
+  });
+
+  test("accepts mixed string and object entries", () => {
+    const result = validateOverrideEntries([
+      ".env",
+      { target: ".npmrc", override: "~/.sandbox-npmrc" },
+      "secrets/",
+    ]);
+    Result.assertOk(result);
+    expect(result.value).toEqual([
+      { target: ".env" },
+      { target: ".npmrc", override: "~/.sandbox-npmrc" },
+      { target: "secrets/" },
+    ]);
+  });
+
+  test("rejects empty string shorthand", () => {
+    const result = validateOverrideEntries([""]);
+    Result.assertError(result);
+    expect(result.error.message).toContain("target");
   });
 
   test("rejects entry with missing target", () => {
