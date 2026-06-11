@@ -7,43 +7,17 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import type { CliDef } from "../types";
-import type { ResolvedOverride } from "../config/overrides";
+import type { SandboxOptions, SandboxCommand } from "./types";
 
-export interface BwrapOptions {
-  /** Current working directory */
-  cwd: string;
-  /** Home directory */
-  home: string;
-  /** CLI definition */
-  cliDef: CliDef;
-  /** Absolute path to the tool executable */
-  toolPath: string;
-  /** Arguments to pass to the tool */
-  toolArgs: string[];
-  /** Whether to use hide-home mode */
-  hideHome: boolean;
-  /** Directories to hide (absolute paths) */
-  hidePaths: string[];
-  /** Empty directory for overlay mounts */
-  emptyDir: string;
-  /** Top-level entries in $HOME (basenames). Used for RO re-binds in non-hideHome mode. */
-  homeEntries: string[];
-  /** CWD overrides from global config, resolved against CWD. */
-  cwdOverrides: ResolvedOverride[];
-  /** Project overrides from .aegis.json, resolved against CWD. */
-  projectOverrides: ResolvedOverride[];
-}
-
-export interface BwrapCommand {
-  cmd: string;
-  args: string[];
-}
+/** @deprecated use SandboxOptions from ./types */
+export type BwrapOptions = SandboxOptions;
+/** @deprecated use SandboxCommand from ./types */
+export type BwrapCommand = SandboxCommand;
 
 /**
  * Build the bwrap argument list for the given options.
  */
-export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
+export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
   const args: string[] = [];
 
   // 1. Base sandbox flags
@@ -130,8 +104,8 @@ export function buildBwrapArgs(opts: BwrapOptions): Result<string[], Error> {
  * Build the full bwrap command (cmd + args) for dry-run output.
  */
 export function buildBwrapCommand(
-  opts: BwrapOptions
-): Result<BwrapCommand, Error> {
+  opts: SandboxOptions
+): Result<SandboxCommand, Error> {
   const argsResult = buildBwrapArgs(opts);
   if (!argsResult.ok) return Result.error(argsResult.error);
   return Result.ok({ cmd: "bwrap", args: argsResult.value });
@@ -142,7 +116,7 @@ export function buildBwrapCommand(
  * Returns the exit code of the sandboxed process.
  */
 export async function executeBwrap(
-  command: BwrapCommand
+  command: SandboxCommand
 ): Promise<Result<number, Error>> {
   try {
     const proc = Bun.spawn([command.cmd, ...command.args], {

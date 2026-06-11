@@ -98,6 +98,50 @@ export async function loadProjectOverrides(
 }
 
 /**
+ * Reject file-content substitution overrides on backends that can't honor them.
+ *
+ * A substitution override ({ target, override }) swaps a file for a different
+ * one — a bind mount on Linux. macOS Seatbelt can only allow or deny a path,
+ * not substitute its contents, so such entries must error rather than silently
+ * doing the wrong thing. Masking entries (no `override`) are always fine.
+ */
+export function assertContentOverridesSupported(
+  backend: { bin: string; supportsContentOverride: boolean },
+  sources: { label: string; entries: OverrideEntry[] }[]
+): Result<void, Error> {
+  if (backend.supportsContentOverride) return Result.ok();
+
+  const offending = sources
+    .map((s) => ({
+      label: s.label,
+      subs: s.entries.filter((e) => e.override !== undefined),
+    }))
+    .filter((s) => s.subs.length > 0);
+  if (offending.length === 0) return Result.ok();
+
+  const blocks = offending
+    .map(
+      (s) =>
+        `  ${s.label}:\n` +
+        s.subs.map((e) => `    - "${e.target}" -> "${e.override}"`).join("\n")
+    )
+    .join("\n");
+
+  return Result.error(
+    new Error(
+      `aegis: file-content override is not supported on the ${backend.bin} backend.\n` +
+        `macOS Seatbelt can deny or allow a path, but cannot substitute its contents,\n` +
+        `so an override that swaps a file for a different one cannot be honored.\n\n` +
+        `Unsupported entries:\n${blocks}\n\n` +
+        `Fix one of:\n` +
+        `  - Remove the "override" field to MASK the path instead (it becomes inaccessible).\n` +
+        `  - Drop these entries from .aegis.json / config.json on macOS.\n` +
+        `  - Run on Linux (bwrap), where bind-mount substitution is supported.`
+    )
+  );
+}
+
+/**
  * Resolve a raw path (~/..., relative, or absolute) to an absolute path.
  */
 export function resolvePath(raw: string, cwd: string, home: string): string {

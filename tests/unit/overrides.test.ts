@@ -13,6 +13,7 @@ import {
   loadProjectOverrides,
   resolvePath,
   resolveOverrides,
+  assertContentOverridesSupported,
   type OverrideEntry,
 } from "../../src/config/overrides";
 
@@ -432,5 +433,67 @@ describe("resolveOverrides", () => {
     expect(result.length).toBe(2);
     expect(result[0]!.target).toBe(envFile);
     expect(result[1]!.target).toBe(secretsDir);
+  });
+});
+
+// ── assertContentOverridesSupported ──
+
+describe("assertContentOverridesSupported", () => {
+  const supporting = { bin: "bwrap", supportsContentOverride: true };
+  const nonSupporting = { bin: "sandbox-exec", supportsContentOverride: false };
+
+  test("passes on a backend that supports content overrides", () => {
+    const result = assertContentOverridesSupported(supporting, [
+      { label: ".aegis.json", entries: [{ target: ".env", override: ".env.sandbox" }] },
+    ]);
+    expect(result.ok).toBe(true);
+  });
+
+  test("passes when only masking entries are present (no override field)", () => {
+    const result = assertContentOverridesSupported(nonSupporting, [
+      { label: ".aegis.json", entries: [{ target: "build/" }, { target: "secrets/" }] },
+    ]);
+    expect(result.ok).toBe(true);
+  });
+
+  test("errors on a substitution entry, naming the target and source file", () => {
+    const result = assertContentOverridesSupported(nonSupporting, [
+      { label: ".aegis.json", entries: [{ target: ".env", override: ".env.sandbox" }] },
+    ]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const msg = result.error.message;
+    expect(msg).toContain("sandbox-exec");
+    expect(msg).toContain(".aegis.json");
+    expect(msg).toContain('".env"');
+    expect(msg).toContain('".env.sandbox"');
+  });
+
+  test("errors only on the substitution entry, ignoring masks alongside it", () => {
+    const result = assertContentOverridesSupported(nonSupporting, [
+      {
+        label: ".aegis.json",
+        entries: [
+          { target: "build/" },
+          { target: ".env", override: ".env.sandbox" },
+        ],
+      },
+    ]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const msg = result.error.message;
+    expect(msg).toContain('".env"');
+    expect(msg).not.toContain("build/");
+  });
+
+  test("reports substitution entries from multiple sources", () => {
+    const result = assertContentOverridesSupported(nonSupporting, [
+      { label: "config.json cwdOverrides", entries: [{ target: "a", override: "b" }] },
+      { label: ".aegis.json", entries: [{ target: "c", override: "d" }] },
+    ]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.message).toContain("config.json cwdOverrides");
+    expect(result.error.message).toContain(".aegis.json");
   });
 });

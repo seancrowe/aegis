@@ -3,11 +3,15 @@
  * These tests run aegis as a child process with --dry-run and verify the output.
  * No actual bubblewrap execution occurs.
  */
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe as _describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+
+// These tests assert the bwrap argv shape, so they only run on Linux.
+// The sandbox-exec (macOS) dry-run path is covered by sandboxExecDryRun.test.ts.
+const describe = process.platform === "linux" ? _describe : _describe.skip;
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
 

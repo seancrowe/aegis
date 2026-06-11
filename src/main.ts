@@ -7,16 +7,19 @@ import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig, validateHidePaths, expandHidePaths } from "./config/config";
-import { loadProjectOverrides, resolveOverrides } from "./config/overrides";
+import {
+  loadProjectOverrides,
+  resolveOverrides,
+  assertContentOverridesSupported,
+} from "./config/overrides";
 import { filterAegisFlags, normalizeToolArgs } from "./tools/tool";
 import {
-  buildBwrapCommand,
-  executeBwrap,
   createEmptyOverlayDir,
   removeOverlayDir,
   cleanStaleOverlays,
   ensureHostPathsExist,
 } from "./sandbox/bwrap";
+import { selectBackend } from "./sandbox/backend";
 
 interface SubCmdOpts {
   hideHome?: boolean;
@@ -25,8 +28,18 @@ interface SubCmdOpts {
 }
 
 async function main() {
-  // Clean up stale overlay dirs from previous crashed/killed runs
-  cleanStaleOverlays();
+  // Select the sandbox backend for this platform (bwrap on Linux, sandbox-exec on macOS).
+  const backendResult = selectBackend();
+  if (!backendResult.ok) {
+    process.stderr.write(backendResult.error.message + "\n");
+    process.exit(1);
+  }
+  const backend = backendResult.value;
+
+  // Clean up stale overlay dirs from previous crashed/killed runs (bwrap only).
+  if (backend.needsEmptyDir) {
+    cleanStaleOverlays();
+  }
 
   const configResult = await loadConfig();
   if (!configResult.ok) {
@@ -54,7 +67,7 @@ async function main() {
         (val: string, acc: string[]) => [...acc, val],
         [] as string[]
       )
-      .option("--dry-run", "Print bwrap command as JSON without executing")
+      .option("--dry-run", "Print the sandbox command as JSON without executing")
       .argument("[args...]", "Arguments to pass to the tool")
       .action(async (_passedArgs: string[], options: SubCmdOpts) => {
         // 1. Resolve tool path (skip for dry-run since nothing is executed)
@@ -99,11 +112,13 @@ async function main() {
           process.exit(1);
         }
 
-        // 7. Enumerate home directory entries for RO re-binds
-        const homeEntries = readdirSync(home, { withFileTypes: true })
-          .filter(e => e.isFile() || e.isDirectory() || e.isSymbolicLink())
-          .map(e => e.name)
-          .sort();
+        // 7. Enumerate home directory entries for RO re-binds (bwrap only).
+        const homeEntries = backend.needsHomeEntries
+          ? readdirSync(home, { withFileTypes: true })
+              .filter(e => e.isFile() || e.isDirectory() || e.isSymbolicLink())
+              .map(e => e.name)
+              .sort()
+          : [];
 
         // 8. Load project overrides (.aegis.json)
         const cwd = process.cwd();
@@ -115,12 +130,23 @@ async function main() {
         const projectEntries = projResult.value ?? [];
         const configCwdOverrides = config.cwdOverrides;
 
-        // 9. Create empty overlay dir if needed + register cleanup
+        // 8b. Reject content-substitution overrides on backends that can't honor them.
+        const overrideCheck = assertContentOverridesSupported(backend, [
+          { label: "config.json cwdOverrides", entries: configCwdOverrides },
+          { label: ".aegis.json", entries: projectEntries },
+        ]);
+        if (!overrideCheck.ok) {
+          process.stderr.write(overrideCheck.error.message + "\n");
+          process.exit(1);
+        }
+
+        // 9. Create empty overlay dir if needed + register cleanup (bwrap only).
         let emptyDir = "";
         const needsEmptyDir =
-          allHidePaths.length > 0 ||
-          configCwdOverrides.length > 0 ||
-          projectEntries.length > 0;
+          backend.needsEmptyDir &&
+          (allHidePaths.length > 0 ||
+            configCwdOverrides.length > 0 ||
+            projectEntries.length > 0);
         if (needsEmptyDir) {
           emptyDir = await createEmptyOverlayDir();
           process.on("exit", () => removeOverlayDir(emptyDir));
@@ -137,8 +163,8 @@ async function main() {
           projectEntries, cwd, home, emptyDir
         );
 
-        // 11. Build bwrap options
-        const bwrapOpts = {
+        // 11. Build sandbox options
+        const sandboxOpts = {
           cwd,
           home,
           cliDef,
@@ -153,7 +179,7 @@ async function main() {
         };
 
         // 12. Build command once, then dry-run or execute
-        const cmdResult = buildBwrapCommand(bwrapOpts);
+        const cmdResult = backend.buildCommand(sandboxOpts);
         if (!cmdResult.ok) {
           process.stderr.write(cmdResult.error.message + "\n");
           process.exit(1);
@@ -164,7 +190,7 @@ async function main() {
           process.exit(0);
         }
 
-        const execResult = await executeBwrap(cmdResult.value);
+        const execResult = await backend.execute(cmdResult.value);
         if (!execResult.ok) {
           process.stderr.write(execResult.error.message + "\n");
           process.exit(1);

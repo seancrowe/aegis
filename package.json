@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "bun run src/main.ts",
     "build": "bun run scripts/build.js",
-    "test": "bun test tests/unit tests/integration/dryRun.test.ts tests/integration/configPersistence.test.ts",
+    "test": "bun test tests/unit tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts",
     "test:unit": "bun test tests/unit",
-    "test:integration": "bun test tests/integration/dryRun.test.ts tests/integration/configPersistence.test.ts",
+    "test:integration": "bun test tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts",
     "test:all": "bun run scripts/test.ts all",
     "test:docker": "bun run scripts/test.ts docker",
     "test:layer3": "bun run scripts/test.ts layer3",
