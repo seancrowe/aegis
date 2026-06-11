@@ -5,9 +5,9 @@ import { Result } from "typescript-result";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, dirname, normalize } from "node:path";
+import { homedir } from "node:os";
 import type { CliDef, RwPath } from "../types";
 import { assertDirectory } from "../fs/paths";
-import envPaths from "../util/envPaths";
 import type { OverrideEntry } from "./overrides";
 import { validateOverrideEntries } from "./overrides";
 
@@ -230,10 +230,14 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
 
 /**
  * Get the config file path.
+ *
+ * Uses XDG Base Directory semantics on all platforms (including macOS) so the
+ * config lives at a single, predictable location: `$XDG_CONFIG_HOME/aegis` when
+ * set, otherwise `~/.config/aegis`.
  */
 export function getConfigPath(): string {
-  const paths = envPaths("aegis", { suffix: false });
-  return join(paths.config, "config.json");
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(configHome, "aegis", "config.json");
 }
 
 /**
