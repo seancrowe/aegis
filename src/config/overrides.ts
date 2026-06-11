@@ -3,6 +3,7 @@
  * Used by both .aegis.json (per-project) and config.cwdOverrides (global).
  */
 import { Result } from "typescript-result";
+import JSON5 from "json5";
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, normalize } from "node:path";
@@ -71,9 +72,9 @@ export function validateOverrideEntries(
 export function parseOverrides(json: string): Result<OverrideEntry[], Error> {
   let raw: unknown;
   try {
-    raw = JSON.parse(json);
+    raw = JSON5.parse(json);
   } catch {
-    return Result.error(new Error("Invalid JSON in overrides"));
+    return Result.error(new Error("Invalid JSON5 in overrides"));
   }
   return validateOverrideEntries(raw);
 }

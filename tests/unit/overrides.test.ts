@@ -149,6 +149,15 @@ describe("parseOverrides", () => {
     expect(result.value).toEqual([]);
   });
 
+  test("accepts JSON5 comments and trailing commas", () => {
+    const result = parseOverrides(`[
+      // mask the real .env
+      { "target": ".env" },
+    ]`);
+    Result.assertOk(result);
+    expect(result.value).toEqual([{ target: ".env" }]);
+  });
+
   test("rejects invalid JSON", () => {
     const result = parseOverrides("not json");
     Result.assertError(result);

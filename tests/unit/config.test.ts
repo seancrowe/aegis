@@ -12,7 +12,9 @@ import {
   defaultCliDefs,
   defaultHidePaths,
   expandHidePaths,
+  expandUserPaths,
   serializeConfig,
+  defaultConfigContent,
   parseConfig,
   loadConfig,
   validateHidePaths,
@@ -36,6 +38,19 @@ describe("defaultConfig", () => {
     const config2 = defaultConfig();
     expect(config1).not.toBe(config2);
     expect(config1).toEqual(config2);
+  });
+});
+
+describe("defaultConfigContent", () => {
+  test("is valid JSON5 that parses to defaultConfig() (no drift)", () => {
+    const result = parseConfig(defaultConfigContent());
+    Result.assertOk(result);
+    expect(result.value).toEqual(defaultConfig());
+  });
+
+  test("contains explanatory comments", () => {
+    expect(defaultConfigContent()).toContain("//");
+    expect(defaultConfigContent()).toContain("extraWritable");
   });
 });
 
@@ -73,6 +88,7 @@ describe("serializeConfig", () => {
     const config: AegisConfig = {
       hideHomeAlways: true,
       hide: ["/path/one", "/path/two"],
+      extraWritable: [],
       cwdOverrides: [],
       clis: defaultCliDefs(),
     };
@@ -157,6 +173,25 @@ describe("expandHidePaths", () => {
   });
 });
 
+describe("expandUserPaths", () => {
+  test("expands ~ and ~/ to home", () => {
+    expect(expandUserPaths(["~", "~/Library/Caches"], "/Users/u")).toEqual([
+      "/Users/u",
+      "/Users/u/Library/Caches",
+    ]);
+  });
+
+  test("passes absolute paths through unchanged", () => {
+    expect(expandUserPaths(["/opt/cache"], "/Users/u")).toEqual(["/opt/cache"]);
+  });
+
+  test("does NOT filter non-existent paths (unlike expandHidePaths)", () => {
+    expect(expandUserPaths(["~/no-such-cache"], "/Users/u")).toEqual([
+      "/Users/u/no-such-cache",
+    ]);
+  });
+});
+
 describe("parseConfig", () => {
   test("parses valid config JSON", () => {
     const json = JSON.stringify({
@@ -238,6 +273,59 @@ describe("parseConfig", () => {
     });
     const result = parseConfig(json);
     Result.assertOk(result);
+  });
+
+  test("accepts JSON5 comments and trailing commas", () => {
+    const json5 = `{
+      // line comment
+      "hideHomeAlways": false,
+      "hide": [
+        "~/.ssh", // trailing comment
+      ],
+      "extraWritable": ["~/.npm",], /* block comment */
+    }`;
+    const result = parseConfig(json5);
+    Result.assertOk(result);
+    expect(result.value.hide).toEqual(["~/.ssh"]);
+    expect(result.value.extraWritable).toEqual(["~/.npm"]);
+  });
+
+  test("defaults extraWritable to [] when omitted", () => {
+    const json = JSON.stringify({ hideHomeAlways: false, hide: [] });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.extraWritable).toEqual([]);
+  });
+
+  test("parses extraWritable entries", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      extraWritable: ["~/Library/Caches", "/opt/cache"],
+    });
+    const result = parseConfig(json);
+    Result.assertOk(result);
+    expect(result.value.extraWritable).toEqual(["~/Library/Caches", "/opt/cache"]);
+  });
+
+  test("fails when extraWritable is not an array", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      extraWritable: "~/Library/Caches",
+    });
+    const result = parseConfig(json);
+    Result.assertError(result);
+  });
+
+  test("fails when extraWritable has non-string elements", () => {
+    const json = JSON.stringify({
+      hideHomeAlways: false,
+      hide: [],
+      extraWritable: ["/valid", 42],
+    });
+    const result = parseConfig(json);
+    Result.assertError(result);
   });
 });
 
@@ -524,6 +612,7 @@ describe("loadConfig", () => {
     const customConfig: AegisConfig = {
       hideHomeAlways: true,
       hide: ["/some/path"],
+      extraWritable: [],
       cwdOverrides: [],
       clis: defaultCliDefs(),
     };

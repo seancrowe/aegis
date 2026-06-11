@@ -3,6 +3,7 @@
  * Tests the pure function that generates bwrap argv from options.
  */
 import { describe, test, expect } from "bun:test";
+import { tmpdir } from "node:os";
 import { Result } from "typescript-result";
 import {
   buildBwrapArgs,
@@ -27,10 +28,12 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
     toolArgs: ["--version"],
     hideHome: false,
     hidePaths: [],
+    extraWritable: [],
     emptyDir: "",
     homeEntries: [],
     cwdOverrides: [],
     projectOverrides: [],
+    tmpPaths: [],
     ...overrides,
   };
 }
@@ -75,6 +78,35 @@ function findSequenceIndex(arr: string[], sequence: string[]): number {
 }
 
 describe("buildBwrapArgs", () => {
+  describe("extraWritable", () => {
+    test("RW-binds an existing extra path", () => {
+      // tmpdir() exists on every host; use it as a stand-in for a cache dir.
+      const real = tmpdir();
+      const result = buildBwrapArgs(makeOpts({ extraWritable: [real] }));
+      Result.assertOk(result);
+      expect(containsSequence(result.value, ["--bind", real, real])).toBe(true);
+    });
+
+    test("skips a non-existent extra path (no bwrap bind error)", () => {
+      const missing = "/no/such/cache/dir-xyz";
+      const result = buildBwrapArgs(makeOpts({ extraWritable: [missing] }));
+      Result.assertOk(result);
+      expect(result.value).not.toContain(missing);
+    });
+
+    test("extra binds come before hide overlays", () => {
+      const real = tmpdir();
+      const result = buildBwrapArgs(
+        makeOpts({ extraWritable: [real], hidePaths: ["/home/user/.ssh"], emptyDir: "/tmp/empty" })
+      );
+      Result.assertOk(result);
+      const bindIdx = findSequenceIndex(result.value, ["--bind", real, real]);
+      const hideIdx = findSequenceIndex(result.value, ["--ro-bind", "/tmp/empty", "/home/user/.ssh"]);
+      expect(bindIdx).toBeGreaterThanOrEqual(0);
+      expect(hideIdx).toBeGreaterThan(bindIdx);
+    });
+  });
+
   describe("base sandbox flags", () => {
     test("includes --die-with-parent", () => {
       const result = buildBwrapArgs(makeOpts());

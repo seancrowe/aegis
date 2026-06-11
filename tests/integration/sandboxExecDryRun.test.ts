@@ -108,6 +108,26 @@ describe("sandbox-exec dry-run", () => {
     );
   });
 
+  test("keeps /tmp and $TMPDIR writable", async () => {
+    const { output } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      tempProject
+    );
+    const profile = profileOf(output);
+    // /tmp stays writable (reads come from `allow default`).
+    expect(profile).toContain('(allow file-write* (subpath "/tmp"))');
+    expect(profile).toContain(
+      `(allow file-write* (subpath "${realpathSync("/tmp")}"))`
+    );
+    // The per-user $TMPDIR (canonicalized) is writable too.
+    expect(profile).toContain(
+      `(allow file-write* (subpath "${realpathSync(tmpdir())}"))`
+    );
+  });
+
   test("--hide adds a deny rule for the hidden path", async () => {
     const secret = join(tempHome, ".ssh");
     await mkdir(secret, { recursive: true });

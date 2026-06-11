@@ -76,6 +76,16 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
     args.push("--bind", fullPath, fullPath);
   }
 
+  // 3b. Extra opt-in writable dirs (config.extraWritable). Bind only paths that
+  //     already exist — bwrap errors on a missing bind source. A non-existent
+  //     entry is silently skipped (config leniency); create the dir first if a
+  //     tool needs to populate it. Must precede the hide overlays in section 5.
+  for (const p of opts.extraWritable) {
+    if (existsSync(p)) {
+      args.push("--bind", p, p);
+    }
+  }
+
   // 4. chdir
   args.push("--chdir", opts.cwd);
 

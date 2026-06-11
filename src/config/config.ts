@@ -2,6 +2,7 @@
  * Configuration management for aegis.
  */
 import { Result } from "typescript-result";
+import JSON5 from "json5";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, dirname, normalize } from "node:path";
@@ -15,9 +16,32 @@ export interface AegisConfig {
   hideHomeAlways: boolean;
   /** Paths to hide in the sandbox. Supports ~ for home directory. */
   hide: string[];
+  /**
+   * Extra directories to keep writable inside the sandbox, beyond cwd and tool
+   * config. Opt-in escape hatch for tools that write outside the project —
+   * build/compiler caches (~/Library/Caches, ~/Library/Developer, ~/.cargo,
+   * ~/.npm, ~/go/pkg, …). Supports ~ for home directory. These often live under
+   * $HOME and may hold credentials, so nothing is writable here unless you add
+   * it. Empty by default.
+   */
+  extraWritable: string[];
   /** CWD-relative bind overrides applied globally to every project. */
   cwdOverrides: OverrideEntry[];
   clis: CliDef[];
+}
+
+/**
+ * Expand ~ in a list of user-supplied paths and normalize them. Unlike
+ * expandHidePaths this does NOT filter out non-existent paths: a writable
+ * allow-rule is still meaningful for a cache dir the tool creates on first use
+ * (the macOS Seatbelt backend matches by path prefix regardless of existence).
+ */
+export function expandUserPaths(paths: string[], home: string): string[] {
+  return paths.map((p) => {
+    if (p === "~") return home;
+    if (p.startsWith("~/")) return normalize(join(home, p.slice(2)));
+    return p;
+  });
 }
 
 /**
@@ -118,6 +142,7 @@ export function defaultConfig(): AegisConfig {
   return {
     hideHomeAlways: false,
     hide: defaultHidePaths(),
+    extraWritable: [],
     cwdOverrides: [],
     clis: defaultCliDefs(),
   };
@@ -131,14 +156,59 @@ export function serializeConfig(config: AegisConfig): string {
 }
 
 /**
- * Parse and validate config from JSON string.
+ * The commented JSON5 template written when no config exists yet. Omits the
+ * `clis` and `cwdOverrides` fields — parseConfig backfills them — so the
+ * generated file stays short and self-documenting. Parsing this template must
+ * yield defaultConfig() exactly; the unit suite asserts that to prevent drift.
+ */
+export function defaultConfigContent(): string {
+  return `{
+  // aegis config — JSON5, so // comments and trailing commas are allowed.
+  // CLI flags are merged at runtime but never written back here.
+
+  // Replace $HOME with an empty view on every run (same as --hide-home).
+  "hideHomeAlways": false,
+
+  // Directories made invisible inside the sandbox. Supports ~.
+  "hide": [
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.config/gcloud",
+    "~/.azure",
+    "~/.kube",
+  ],
+
+  // Extra dirs to keep WRITABLE beyond your project + tool config — the
+  // escape hatch for build/compiler caches a tool writes outside the project.
+  // Uncomment what you use. WARNING: these live under $HOME and some also hold
+  // credentials, so prefer the narrowest subpath that fixes your write error.
+  "extraWritable": [
+    // "~/Library/Developer/Xcode/DerivedData", // Xcode build products
+    // "~/Library/Caches/org.swift.swiftpm",    // Swift Package Manager
+    // "~/.npm",                                 // npm cache
+    // "~/.cargo/registry",                      // Cargo (whole ~/.cargo also holds credentials.toml)
+    // "~/.rustup",                              // Rust toolchains
+    // "~/go/pkg/mod", "~/Library/Caches/go-build", // Go
+    // "~/Library/Caches/pip",                   // pip
+    // "~/.gradle/caches",                       // Gradle (gradle.properties holds signing keys)
+    // "~/.m2/repository",                       // Maven (settings.xml holds repo passwords)
+  ],
+}
+`;
+}
+
+/**
+ * Parse and validate config from a JSON5 string. JSON5 is a superset of JSON,
+ * so existing plain-JSON configs still parse — but users may now add comments
+ * and trailing commas to config.json.
  */
 export function parseConfig(json: string): Result<AegisConfig, Error> {
   let raw: unknown;
   try {
-    raw = JSON.parse(json);
+    raw = JSON5.parse(json);
   } catch {
-    return Result.error(new Error("Invalid JSON"));
+    return Result.error(new Error("Invalid JSON5"));
   }
 
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -159,6 +229,22 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
     if (typeof item !== "string") {
       return Result.error(new Error("Invalid entry in hide: expected string"));
     }
+  }
+
+  // Validate extraWritable (optional, default to [])
+  let extraWritable: string[] = [];
+  if (obj.extraWritable !== undefined) {
+    if (!Array.isArray(obj.extraWritable)) {
+      return Result.error(new Error("Invalid field: extraWritable"));
+    }
+    for (const item of obj.extraWritable) {
+      if (typeof item !== "string") {
+        return Result.error(
+          new Error("Invalid entry in extraWritable: expected string")
+        );
+      }
+    }
+    extraWritable = obj.extraWritable as string[];
   }
 
   // Validate cwdOverrides (optional, default to [])
@@ -223,6 +309,7 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
   return Result.ok({
     hideHomeAlways: obj.hideHomeAlways as boolean,
     hide: obj.hide as string[],
+    extraWritable,
     cwdOverrides,
     clis,
   });
@@ -251,7 +338,7 @@ export async function loadConfig(): Promise<Result<AegisConfig, Error>> {
     await mkdir(dir, { recursive: true });
     const defaultCfg = defaultConfig();
     const tmp = join(dir, `.aegis-config-${process.pid}.tmp`);
-    await writeFile(tmp, serializeConfig(defaultCfg), "utf-8");
+    await writeFile(tmp, defaultConfigContent(), "utf-8");
     await rename(tmp, configPath);
     return Result.ok(defaultCfg);
   }

@@ -10,6 +10,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+import JSON5 from "json5";
 import type { CliDef } from "../../src/types";
 import { defaultHidePaths } from "../../src/config/config";
 
@@ -231,9 +232,10 @@ describe("config persistence - CLI flags should not modify config.json", () => {
     // The command should succeed
     expect(exitCode).toBe(0);
 
-    // Config file should be created (per plan.md spec)
+    // Config file should be created (per plan.md spec). It's written as a
+    // commented JSON5 template, so parse with JSON5 rather than JSON.
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON.parse(afterConfigContent);
+    const afterConfig: AegisConfig = JSON5.parse(afterConfigContent);
 
     // Critical invariant: CLI hide path must NOT be persisted
     expect(afterConfig.hide).toEqual(defaultHidePaths());

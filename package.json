@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "commander": "14.0.3",
+    "json5": "^2.2.3",
     "typescript-result": "3.5.2"
   },
   "devDependencies": {

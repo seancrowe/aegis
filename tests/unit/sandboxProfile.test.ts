@@ -25,10 +25,12 @@ function makeOpts(overrides: Partial<SandboxOptions> = {}): SandboxOptions {
     toolArgs: ["--version"],
     hideHome: false,
     hidePaths: [],
+    extraWritable: [],
     emptyDir: "",
     homeEntries: [],
     cwdOverrides: [],
     projectOverrides: [],
+    tmpPaths: [],
     ...overrides,
   };
 }
@@ -74,6 +76,41 @@ describe("buildSandboxProfile — read-only root", () => {
   });
 });
 
+describe("buildSandboxProfile — device nodes", () => {
+  test("re-allows writes to the standard scratch device nodes", () => {
+    const p = buildSandboxProfile(makeOpts());
+    for (const dev of [
+      "/dev/null",
+      "/dev/zero",
+      "/dev/random",
+      "/dev/urandom",
+      "/dev/tty",
+      "/dev/dtracehelper",
+      "/dev/ptmx",
+    ]) {
+      expect(p).toContain(`(allow file-write* (literal "${dev}"))`);
+    }
+  });
+
+  test("allows writes to /dev/fd and dynamically-numbered pty slaves", () => {
+    const p = buildSandboxProfile(makeOpts());
+    expect(p).toContain('(allow file-write* (subpath "/dev/fd"))');
+    expect(p).toContain('(allow file-write* (regex #"^/dev/ttys[0-9]+$"))');
+  });
+
+  test("device allows come after the global deny-write (last-match-wins)", () => {
+    const p = buildSandboxProfile(makeOpts());
+    const denyWrite = lineWith(p, "(deny file-write*)");
+    const allowNull = lineWith(p, '(allow file-write* (literal "/dev/null"))');
+    expect(allowNull).toBeGreaterThan(denyWrite);
+  });
+
+  test("does not allow writes to block devices like /dev/disk0", () => {
+    const p = buildSandboxProfile(makeOpts());
+    expect(p).not.toContain("/dev/disk0");
+  });
+});
+
 describe("buildSandboxProfile — writable paths", () => {
   test("allows write to cwd", () => {
     const p = buildSandboxProfile(makeOpts({ cwd: "/Users/user/proj" }));
@@ -94,6 +131,42 @@ describe("buildSandboxProfile — writable paths", () => {
     const denyWrite = lineWith(p, "(deny file-write*)");
     const allowCwd = lineWith(p, '(subpath "/Users/user/project")');
     expect(allowCwd).toBeGreaterThan(denyWrite);
+  });
+});
+
+describe("buildSandboxProfile — extraWritable", () => {
+  test("allows read+write for each extra path", () => {
+    const p = buildSandboxProfile(
+      makeOpts({ extraWritable: ["/Users/user/Library/Caches", "/Users/user/.cargo"] })
+    );
+    expect(p).toContain(
+      '(allow file-read* file-write* (subpath "/Users/user/Library/Caches"))'
+    );
+    expect(p).toContain(
+      '(allow file-read* file-write* (subpath "/Users/user/.cargo"))'
+    );
+  });
+
+  test("emits nothing extra when empty", () => {
+    const p = buildSandboxProfile(makeOpts({ extraWritable: [] }));
+    // Only cwd + the two claude rwPaths are writable subpaths.
+    const allows = p
+      .split("\n")
+      .filter((l) => l.startsWith("(allow file-read* file-write* (subpath"));
+    expect(allows.length).toBe(3);
+  });
+
+  test("extra writable allows precede hide denies (hide wins last-match)", () => {
+    const p = buildSandboxProfile(
+      makeOpts({
+        extraWritable: ["/Users/user/Library/Caches"],
+        hidePaths: ["/Users/user/Library/Caches"],
+      })
+    );
+    const allow = lineWith(p, '(allow file-read* file-write* (subpath "/Users/user/Library/Caches"))');
+    const deny = lineWith(p, '(deny file-read* file-write* (subpath "/Users/user/Library/Caches"))');
+    expect(allow).toBeGreaterThanOrEqual(0);
+    expect(deny).toBeGreaterThan(allow);
   });
 });
 

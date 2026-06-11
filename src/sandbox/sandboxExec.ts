@@ -7,12 +7,19 @@
  *   --bind ~/.claude ... -> (allow file-read* file-write* (subpath ...))   [rwPaths]
  *   --ro-bind EMPTY HIDE -> (deny file-read* file-write* (subpath HIDE))   [hidePaths/masks]
  *   --tmpfs $HOME        -> (deny file-read* (subpath $HOME)) + re-allows   [hideHome]
+ *   --tmpfs /tmp         -> (allow file-write* (subpath /tmp …))           [tmpPaths]
+ *
+ * Note the /tmp mapping is NOT isolation: bwrap mounts a private tmpfs, while
+ * Seatbelt can only re-permit writes to the host's real temp dirs. The tool
+ * shares the host /tmp and $TMPDIR (see README "macOS notes").
  *
  * Rules are emitted in last-match-wins order so later, more specific rules
  * override earlier broad ones — the declarative analogue of bwrap's mount stack.
  */
 import { Result } from "typescript-result";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { SandboxOptions, SandboxCommand } from "./types";
 
 /**
@@ -35,6 +42,23 @@ function literal(path: string): string {
 }
 
 /**
+ * Write-only character devices that stay writable inside the sandbox. These
+ * hold no user data; denying writes to them only breaks programs (most notably
+ * /dev/null, which is touched by an enormous fraction of shell commands).
+ * Pseudo-terminal masters/slaves are added separately (ptmx here, /dev/ttysNNN
+ * via regex) so spawned subprocesses can allocate a tty.
+ */
+const DEVICE_LITERALS = [
+  "/dev/null",
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+  "/dev/tty",
+  "/dev/dtracehelper",
+  "/dev/ptmx",
+] as const;
+
+/**
  * Build the Seatbelt profile (SBPL) for the given options.
  */
 export function buildSandboxProfile(opts: SandboxOptions): string {
@@ -50,6 +74,22 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
     '(deny process-exec (regex #"(/|^)(sudo|su|login|doas|pkexec)$"))'
   );
 
+  // 2b. Re-allow writes to the standard device nodes. The global deny above
+  //     blocks ALL writes, but these are write-only "scratch" devices that a
+  //     huge fraction of programs touch — redirecting to /dev/null, seeding
+  //     from /dev/urandom, talking to the controlling terminal, allocating a
+  //     pty for a spawned subprocess. Denying them produces spurious
+  //     "operation not permitted" failures with no security benefit (they hold
+  //     no user data). This is macOS-only: the bwrap backend gets a real /dev
+  //     via `--dev /dev`. Block devices (raw disks like /dev/disk0) are
+  //     deliberately NOT listed.
+  for (const dev of DEVICE_LITERALS) {
+    lines.push(`(allow file-write* ${literal(dev)})`);
+  }
+  // Per-fd nodes (/dev/fd/N) and dynamically-numbered pty slaves (/dev/ttysNNN).
+  lines.push(`(allow file-write* (subpath "/dev/fd"))`);
+  lines.push(`(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`);
+
   // 3. hide-home: deny reads under $HOME to emulate an empty tmpfs $HOME.
   //    Writable rwPaths and cwd are re-allowed below (last-match-wins).
   if (opts.hideHome) {
@@ -64,6 +104,22 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
   }
   for (const p of writable) {
     lines.push(`(allow file-read* file-write* ${subpath(p)})`);
+  }
+
+  // 4a. Extra opt-in writable dirs (config.extraWritable). Emitted before
+  //     hidePaths/overrides so an explicit `--hide` of the same path still wins
+  //     under last-match. No existence check: a subpath rule matches a cache
+  //     dir the tool creates on first use.
+  for (const p of opts.extraWritable) {
+    lines.push(`(allow file-read* file-write* ${subpath(p)})`);
+  }
+
+  // 4b. Keep temp dirs writable. Reads are already permitted by (allow
+  //     default); this re-allows the writes that the global (deny file-write*)
+  //     would otherwise block, giving the tool a working /tmp and $TMPDIR.
+  //     Emitted before hidePaths so an explicit `--hide /tmp` can still win.
+  for (const tp of opts.tmpPaths) {
+    lines.push(`(allow file-write* ${subpath(tp)})`);
   }
 
   // 5. Hidden credential dirs.
@@ -83,6 +139,27 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
   lines.push(`(allow file-read* process-exec ${literal(opts.toolPath)})`);
 
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Resolve the host temp directories that stay writable inside the sandbox:
+ * the system /tmp and the per-user $TMPDIR. Paths are canonicalized via
+ * realpath so the SBPL subpath rules match the kernel's resolved paths
+ * (/tmp -> /private/tmp, $TMPDIR -> /private/var/folders/...). The literal
+ * "/tmp" is always included so the rule reads sensibly even if realpath fails.
+ */
+export function resolveTmpPaths(): string[] {
+  const paths = new Set<string>(["/tmp"]);
+  const add = (p: string): void => {
+    try {
+      paths.add(realpathSync(p));
+    } catch {
+      // Path may not exist on this host; skip it.
+    }
+  };
+  add("/tmp");
+  add(tmpdir());
+  return [...paths];
 }
 
 /**

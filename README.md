@@ -94,12 +94,16 @@ aegis claude --hide-home --version
 
 ## Configuration
 
-Config is stored at `$XDG_CONFIG_HOME/aegis/config.json` (defaults to `~/.config/aegis/config.json`):
+Config is stored at `$XDG_CONFIG_HOME/aegis/config.json` (defaults to `~/.config/aegis/config.json`). The file is parsed as **[JSON5](https://json5.org)**, so `//` and `/* */` comments and trailing commas are allowed — plain JSON still works unchanged. The same goes for per-project `.aegis.json` override files. On first run aegis writes a commented template you can edit in place.
 
-```json
+```json5
 {
+  // Replace $HOME with an empty view on every run (same as --hide-home).
   "hideHomeAlways": false,
-  "hide": []
+  // Directories made invisible inside the sandbox. Supports ~.
+  "hide": [],
+  // Extra dirs to keep writable beyond cwd + tool config. Supports ~.
+  "extraWritable": [],
 }
 ```
 
@@ -107,6 +111,59 @@ Config is stored at `$XDG_CONFIG_HOME/aegis/config.json` (defaults to `~/.config
 |-------|------|-------------|
 | `hideHomeAlways` | `boolean` | When `true`, always apply `--hide-home` behavior |
 | `hide` | `string[]` | Directories to always hide (merged with CLI `--hide` flags) |
+| `extraWritable` | `string[]` | Extra directories to keep writable beyond cwd + tool config. Supports `~`. Opt-in escape hatch for tools that write outside the project — build/compiler caches such as `~/Library/Caches`, `~/Library/Developer`, `~/.cargo`, `~/.npm`, `~/go/pkg`. **Security note:** these often live under `$HOME` and may hold credentials, so nothing here is writable unless you add it. Empty by default. |
+
+> **When do you need `extraWritable`?** If a sandboxed tool fails with "operation not permitted" while writing *outside* your project (a compiler populating its cache, a package manager, etc.), add that directory here. Writes to cwd, the tool's own config, `/tmp`/`$TMPDIR`, and the standard device nodes (`/dev/null`, `/dev/urandom`, ptys, …) already work without configuration.
+
+#### Common `extraWritable` paths (macOS)
+
+Build toolchains write their caches outside the project. Copy the lines for the toolchains you use into `extraWritable` — there's no harm in listing a path you don't have (it's just an allow rule for a dir that never gets touched).
+
+> **Security:** `extraWritable` lives under `$HOME`. Some of these dirs hold credentials, not just cache (flagged ⚠ below). Prefer the narrowest subpath that fixes your write failure — e.g. `~/.cargo/registry` instead of all of `~/.cargo` — and widen only if a write still fails.
+
+Since `config.json` is JSON5, you can paste this block — comments and trailing commas included — straight into the file.
+
+```json5
+{
+  "extraWritable": [
+    // General / Apple
+    "~/Library/Caches",                          // OS-wide cache (broad; prefer subdirs below)
+    "~/Library/Developer/Xcode/DerivedData",     // Xcode / xcodebuild build products
+    "~/Library/Developer/CoreSimulator",         // iOS Simulator
+    "~/Library/Caches/org.swift.swiftpm",        // Swift Package Manager cache
+    "~/.swiftpm",                                 // SwiftPM config/cache
+
+    // Node / JS
+    "~/.npm",                                     // npm cache
+    "~/.bun/install/cache",                       // Bun
+    "~/Library/pnpm", "~/.local/share/pnpm",      // pnpm store
+    "~/.cache/node/corepack",                     // Corepack
+    "~/Library/Caches/Yarn",                      // Yarn 1
+
+    // Rust
+    "~/.cargo/registry",                          // Cargo registry + build cache
+    "~/.rustup",                                  // toolchains
+    // "~/.cargo",                                // ⚠ whole dir also holds credentials.toml
+
+    // Go
+    "~/go/pkg/mod",                               // module cache
+    "~/Library/Caches/go-build",                  // build cache
+
+    // Python
+    "~/Library/Caches/pip",                       // pip
+    "~/.cache/uv",                                // uv (also ~/Library/Caches/uv)
+    "~/Library/Caches/pypoetry",                  // Poetry
+
+    // Java / Kotlin
+    "~/.m2/repository",                           // Maven (⚠ ~/.m2/settings.xml holds repo passwords)
+    "~/.gradle/caches",                           // Gradle (⚠ ~/.gradle/gradle.properties holds signing keys)
+
+    // C/C++ / Bazel
+    "~/.ccache",                                  // ccache
+    "~/.cache/bazel"                              // Bazel
+  ]
+}
+```
 
 CLI flags are merged with config at runtime but **never persisted** back to config.
 
@@ -123,9 +180,12 @@ aegis builds a bubblewrap command with these mount layers (in order):
 3. **Tmpfs for /tmp** — isolated temp directory
 4. **Read-write cwd** — `--bind $CWD $CWD` so the tool can edit your project
 5. **Read-write tool config** — tool-specific paths like `~/.claude`, `~/.config/opencode`
-6. **Hide-home overlay** — (if `--hide-home`) replaces `$HOME` with tmpfs, then re-binds tool config paths on top
-7. **Hide overlays** — (if `--hide`) makes specified directories appear empty
-8. **Process isolation** — `--die-with-parent` ensures the sandbox dies with aegis
+6. **Read-write extras** — (if `extraWritable`) `--bind` for each existing configured directory
+7. **Hide-home overlay** — (if `--hide-home`) replaces `$HOME` with tmpfs, then re-binds tool config paths on top
+8. **Hide overlays** — (if `--hide`) makes specified directories appear empty
+9. **Process isolation** — `--die-with-parent` ensures the sandbox dies with aegis
+
+(`/dev` is provided whole via `--dev /dev`, so device nodes like `/dev/null` are writable as usual on Linux.)
 
 The tool binary is then executed inside this sandbox with `--chdir` set to the original working directory.
 
@@ -134,11 +194,13 @@ The tool binary is then executed inside this sandbox with `--chdir` set to the o
 aegis emits a Seatbelt (SBPL) profile expressing the same intent as allow/deny rules, in last-match-wins order:
 
 1. **Read-only root** — `(allow default)` then `(deny file-write*)`: everything readable, nothing writable
-2. **Read-write cwd + tool config** — `(allow file-read* file-write* (subpath …))` for the cwd and paths like `~/.claude`
-3. **Hidden credential dirs** — `(deny file-read* file-write* (subpath …))` for `--hide` paths
-4. **Hide-home** — (if `--hide-home`) `(deny file-read* (subpath $HOME))`, with tool config re-allowed afterward
-5. **Privilege-escalation guard** — denies exec of `sudo`/`su`/`login`/`doas`/`pkexec`
-6. **Tool binary carve-out** — keeps the harness binary readable/executable even under a denied subtree
+2. **Privilege-escalation guard** — denies exec of `sudo`/`su`/`login`/`doas`/`pkexec`
+3. **Device nodes** — re-allows writes to the standard scratch devices (`/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/tty`, `/dev/fd/*`, ptys, …) that the global deny would otherwise block. Block devices (raw disks) are not included.
+4. **Read-write cwd + tool config** — `(allow file-read* file-write* (subpath …))` for the cwd and paths like `~/.claude`
+5. **Read-write extras** — (if `extraWritable`) an allow rule per configured directory (matched by prefix, so it works even before the dir exists)
+6. **Hidden credential dirs** — `(deny file-read* file-write* (subpath …))` for `--hide` paths
+7. **Hide-home** — (if `--hide-home`) `(deny file-read* (subpath $HOME))`, with tool config re-allowed afterward
+8. **Tool binary carve-out** — keeps the harness binary readable/executable even under a denied subtree
 
 The profile is passed inline via `sandbox-exec -p`, so `--dry-run` shows it verbatim. See the [macOS notes](#macos-notes) for behavioral differences.
 

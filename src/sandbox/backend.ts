@@ -16,6 +16,11 @@ export interface SandboxBackend {
   readonly needsHomeEntries: boolean;
   /** Whether the backend can substitute file contents via overrides. */
   readonly supportsContentOverride: boolean;
+  /**
+   * Whether the backend needs the host temp paths computed so it can keep
+   * them writable (macOS). bwrap uses a private tmpfs and doesn't.
+   */
+  readonly needsTmpPaths: boolean;
   buildCommand(opts: SandboxOptions): Result<SandboxCommand, Error>;
   execute(cmd: SandboxCommand): Promise<Result<number, Error>>;
 }
@@ -25,6 +30,7 @@ const bwrapBackend: SandboxBackend = {
   needsEmptyDir: true,
   needsHomeEntries: true,
   supportsContentOverride: true,
+  needsTmpPaths: false,
   buildCommand: buildBwrapCommand,
   execute: executeBwrap,
 };
@@ -34,6 +40,7 @@ const sandboxExecBackend: SandboxBackend = {
   needsEmptyDir: false,
   needsHomeEntries: false,
   supportsContentOverride: false,
+  needsTmpPaths: true,
   buildCommand: buildSandboxExecCommand,
   execute: executeSandboxExec,
 };

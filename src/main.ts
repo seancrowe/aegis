@@ -6,7 +6,7 @@ import { Command } from "commander";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { loadConfig, validateHidePaths, expandHidePaths } from "./config/config";
+import { loadConfig, validateHidePaths, expandHidePaths, expandUserPaths } from "./config/config";
 import {
   loadProjectOverrides,
   resolveOverrides,
@@ -20,6 +20,7 @@ import {
   ensureHostPathsExist,
 } from "./sandbox/bwrap";
 import { selectBackend } from "./sandbox/backend";
+import { resolveTmpPaths } from "./sandbox/sandboxExec";
 
 interface SubCmdOpts {
   hideHome?: boolean;
@@ -93,6 +94,11 @@ async function main() {
         }
         const allHidePaths = [...configHide, ...cliHidePaths];
 
+        // Extra writable dirs (opt-in escape hatch). Expand ~ but keep
+        // non-existent entries: macOS allows them by policy regardless, and
+        // bwrap filters to existing paths at bind time.
+        const extraWritable = expandUserPaths(config.extraWritable, home);
+
         // 4. Get raw args from process.argv (after subcommand)
         const subIdx = process.argv.indexOf(cliDef.subCommand, 2);
         const rawArgs = subIdx >= 0 ? process.argv.slice(subIdx + 1) : _passedArgs;
@@ -119,6 +125,10 @@ async function main() {
               .map(e => e.name)
               .sort()
           : [];
+
+        // 7b. Temp dirs to keep writable (sandbox-exec only; bwrap uses a
+        //     private tmpfs and ignores this).
+        const tmpPaths = backend.needsTmpPaths ? resolveTmpPaths() : [];
 
         // 8. Load project overrides (.aegis.json)
         const cwd = process.cwd();
@@ -172,10 +182,12 @@ async function main() {
           toolArgs,
           hideHome,
           hidePaths: allHidePaths,
+          extraWritable,
           emptyDir,
           homeEntries,
           cwdOverrides: resolvedCwdOverrides,
           projectOverrides: resolvedProjectOverrides,
+          tmpPaths,
         };
 
         // 12. Build command once, then dry-run or execute
