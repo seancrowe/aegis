@@ -240,6 +240,38 @@ describe("filterAegisFlags", () => {
     const result = filterAegisFlags(args);
     expect(result).toEqual([]);
   });
+
+  test("removes --writable flag with value", () => {
+    const args = ["--writable", "/extra/path", "--version"];
+    const result = filterAegisFlags(args);
+    expect(result).toEqual(["--version"]);
+  });
+
+  test("removes -w short flag with value", () => {
+    const args = ["-w", "/extra/path", "--version"];
+    const result = filterAegisFlags(args);
+    expect(result).toEqual(["--version"]);
+  });
+
+  test("removes multiple --writable flags", () => {
+    const args = [
+      "--writable",
+      "/path1",
+      "--version",
+      "-w",
+      "/path2",
+      "--writable",
+      "/path3",
+    ];
+    const result = filterAegisFlags(args);
+    expect(result).toEqual(["--version"]);
+  });
+
+  test("removes --writable= syntax", () => {
+    const args = ["--writable=/extra/path", "--version"];
+    const result = filterAegisFlags(args);
+    expect(result).toEqual(["--version"]);
+  });
 });
 
 describe("getCliDef", () => {

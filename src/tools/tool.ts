@@ -36,11 +36,11 @@ export function filterAegisFlags(args: string[]): string[] {
       i++;
       continue;
     }
-    if (args[i] === "--hide") {
+    if (args[i] === "--hide" || args[i] === "--writable" || args[i] === "-w") {
       i += 2; // skip flag + value
       continue;
     }
-    if (args[i]!.startsWith("--hide=")) {
+    if (args[i]!.startsWith("--hide=") || args[i]!.startsWith("--writable=")) {
       i++;
       continue;
     }

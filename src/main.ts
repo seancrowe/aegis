@@ -25,6 +25,7 @@ import { resolveTmpPaths } from "./sandbox/sandboxExec";
 interface SubCmdOpts {
   hideHome?: boolean;
   hide?: string[];
+  writable?: string[];
   dryRun?: boolean;
 }
 
@@ -68,6 +69,12 @@ async function main() {
         (val: string, acc: string[]) => [...acc, val],
         [] as string[]
       )
+      .option(
+        "-w, --writable <path>",
+        "Allow write access to additional directories",
+        (val: string, acc: string[]) => [...acc, val],
+        [] as string[]
+      )
       .option("--dry-run", "Print the sandbox command as JSON without executing")
       .argument("[args...]", "Arguments to pass to the tool")
       .action(async (_passedArgs: string[], options: SubCmdOpts) => {
@@ -94,10 +101,10 @@ async function main() {
         }
         const allHidePaths = [...configHide, ...cliHidePaths];
 
-        // Extra writable dirs (opt-in escape hatch). Expand ~ but keep
-        // non-existent entries: macOS allows them by policy regardless, and
-        // bwrap filters to existing paths at bind time.
-        const extraWritable = expandUserPaths(config.extraWritable, home);
+        const cliWritable: string[] = options.writable || [];
+        const extraWritable = expandUserPaths(
+          [...config.extraWritable, ...cliWritable], home
+        );
 
         // 4. Get raw args from process.argv (after subcommand)
         const subIdx = process.argv.indexOf(cliDef.subCommand, 2);
