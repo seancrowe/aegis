@@ -56,7 +56,18 @@ async function main() {
   program
     .name("aegis")
     .version(pkg.version, "-V, --version")
-    .enablePositionalOptions();
+    .enablePositionalOptions()
+    .addHelpText(
+      "after",
+      `
+Sandbox flags (pass after the tool, e.g. \`aegis <tool> --hide-home\`):
+  --hide-home              Replace $HOME with an empty view
+  --hide <path>            Hide a specific directory (repeatable)
+  -w, --writable <path>    Allow write access to a directory (repeatable)
+  --dry-run                Print the sandbox command as JSON without executing
+
+Run \`aegis <tool> --help\` for the full per-tool flag list.`
+    );
 
   for (const cliDef of config.clis) {
     program
