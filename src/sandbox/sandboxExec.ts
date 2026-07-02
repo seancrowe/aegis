@@ -188,6 +188,7 @@ export async function executeSandboxExec(
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
+      env: { ...process.env, AEGIS_SANDBOX: "1" },
     });
     const exitCode = await proc.exited;
     return Result.ok(exitCode);
