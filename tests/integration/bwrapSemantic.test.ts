@@ -153,6 +153,47 @@ async function runAegis(
   return { stdout, stderr, exitCode };
 }
 
+const HOME_DIR = process.env.HOME || "/home/testuser";
+const HOME_BIN = `${HOME_DIR}/.local/bin`;
+
+/**
+ * Run aegis against a tool resolved from ~/.local/bin instead of the repo
+ * fixtures, so the tool binary sits inside the region --hide-home masks.
+ * Deliberately omits FIXTURES_BIN_TOOLS from PATH — those shadow the
+ * home-installed tools of the same name.
+ */
+async function runAegisHomeInstalled(
+  subCmd: string,
+  aegisArgs: string[] = [],
+  cwd: string = DEFAULT_PROJECT_DIR
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = spawn({
+    cmd: ["bun", "run", AEGIS_PATH, subCmd, ...aegisArgs],
+    env: {
+      ...process.env,
+      PATH: `${HOME_BIN}:${process.env.PATH}`,
+    },
+    cwd: cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+
+  const exitCode = await proc.exited;
+  return { stdout, stderr, exitCode };
+}
+
+/**
+ * Extract the marker printed by the home-installed fixture tools.
+ */
+function parseHomeInstalledMarker(stdout: string): string | undefined {
+  return stdout.match(/HOME_INSTALLED_TOOL=(\w+)/)?.[1];
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -354,6 +395,58 @@ describe("bwrap semantic tests", () => {
       // ~/.secret-credentials is not in the default hide paths
       const exists = parseSecretCredentialExists(stdout);
       expect(exists).toBe(true);
+    });
+  });
+
+  /**
+   * The real agents install themselves inside $HOME — the official installers
+   * produce ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>, and
+   * ~/.local/bin/codex -> .../current/bin/codex -> .../releases/<v>/bin/codex.
+   *
+   * --hide-home puts a tmpfs over $HOME, which does not merely deny access to
+   * those paths: it removes them from the mount namespace, so there is nothing
+   * left for the kernel to resolve and exec fails with ENOENT. The launcher
+   * symlink and every hop of its chain have to be bound back in.
+   *
+   * This is a bwrap-specific problem. macOS masks $HOME with seatbelt deny
+   * rules, where the files still exist and exec of the resolved image is
+   * permitted, so the same layout works there untouched.
+   */
+  describe("tool binary installed under $HOME", () => {
+    test("baseline: one-hop install runs without --hide-home", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, exitCode } = await runAegisHomeInstalled("cc");
+      expect(exitCode).toBe(0);
+      expect(parseHomeInstalledMarker(stdout)).toBe("claude");
+    });
+
+    test("one-hop install still runs with --hide-home", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, stderr, exitCode } = await runAegisHomeInstalled("cc", [
+        "--hide-home",
+      ]);
+      expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
+      expect(parseHomeInstalledMarker(stdout)).toBe("claude");
+    });
+
+    test("baseline: two-hop install runs without --hide-home", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, exitCode } = await runAegisHomeInstalled("codex");
+      expect(exitCode).toBe(0);
+      expect(parseHomeInstalledMarker(stdout)).toBe("codex");
+    });
+
+    test("two-hop install still runs with --hide-home", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, stderr, exitCode } = await runAegisHomeInstalled("codex", [
+        "--hide-home",
+      ]);
+      expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
+      expect(parseHomeInstalledMarker(stdout)).toBe("codex");
     });
   });
 });

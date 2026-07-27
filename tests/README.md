@@ -83,6 +83,30 @@ Layer 3 (bwrap semantic) tests must run inside Docker.
 Use 'bun run scripts/test.ts' or run directly in Docker container.
 ```
 
+#### Host requirement: unprivileged user namespaces
+
+bwrap needs unprivileged user namespaces, and `--privileged` on the container is
+not sufficient — the restriction lives in the kernel running the Docker daemon.
+Ubuntu 24.04+ and Debian 13+ ship an AppArmor policy that denies them, which
+includes the VM images used by colima, Lima, and Rancher Desktop. Every L3 test
+fails identically when this bites:
+
+```
+bwrap: setting up uid map: Permission denied
+```
+
+Check and relax it inside the VM (colima shown; `lima shell` for Lima):
+
+```bash
+colima ssh -- sysctl -n kernel.apparmor_restrict_unprivileged_userns   # 1 = will fail
+colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+`sysctl -w` does not persist, so this has to be redone after the VM restarts. On
+a Linux host running Docker natively, apply the same sysctl to the host. If
+*every* L3 test fails rather than a specific few, check this before assuming a
+regression.
+
 ## Unified Test Runner
 
 The `scripts/test.ts` script orchestrates all test layers:

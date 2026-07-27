@@ -66,6 +66,37 @@ RUN mkdir -p ~/.claude && \
     echo '{"version": 1}' > ~/.claude/settings.json && \
     echo '{}' > ~/.claude.json
 
+# =============================================================================
+# Tools installed UNDER $HOME, mirroring how the real CLIs install themselves.
+#
+# The repo fixtures in tests/fixtures/bin-tools live outside $HOME, so
+# `--tmpfs $HOME` never hides them. Real agents are not so convenient: the
+# official installers put both the launcher symlink and its target inside
+# $HOME, which --hide-home removes from the mount namespace entirely. Exec
+# then fails with ENOENT unless every hop of the symlink chain is bound back.
+# =============================================================================
+
+# One hop, mirroring claude:
+#   ~/.local/bin/claude -> ~/.local/share/claude/versions/<version>
+RUN mkdir -p ~/.local/bin ~/.local/share/claude/versions/1.0.0 && \
+    printf '#!/bin/sh\necho "HOME_INSTALLED_TOOL=claude"\nexit 0\n' \
+      > ~/.local/share/claude/versions/1.0.0/claude && \
+    chmod +x ~/.local/share/claude/versions/1.0.0/claude && \
+    ln -s ~/.local/share/claude/versions/1.0.0/claude ~/.local/bin/claude
+
+# Two hops through a "current" indirection, mirroring codex:
+#   ~/.local/bin/codex -> ~/.codex/packages/standalone/current/bin/codex
+#                      -> ~/.codex/packages/standalone/releases/<version>/bin/codex
+# Binding only the final realpath leaves "current" dangling, so this case
+# catches a fix that resolves to realpath instead of walking the chain.
+RUN mkdir -p ~/.codex/packages/standalone/releases/0.1.0/bin && \
+    printf '#!/bin/sh\necho "HOME_INSTALLED_TOOL=codex"\nexit 0\n' \
+      > ~/.codex/packages/standalone/releases/0.1.0/bin/codex && \
+    chmod +x ~/.codex/packages/standalone/releases/0.1.0/bin/codex && \
+    ln -s ~/.codex/packages/standalone/releases/0.1.0 \
+          ~/.codex/packages/standalone/current && \
+    ln -s ~/.codex/packages/standalone/current/bin/codex ~/.local/bin/codex
+
 # Project with secrets (for --hide flag testing)
 RUN mkdir -p /home/testuser/project/secrets && \
     echo "api-key=sk-test-12345" > /home/testuser/project/secrets/api-key.txt && \
