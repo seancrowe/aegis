@@ -141,21 +141,35 @@ aegis claude --hide-home --version
 
 Config is stored at `$XDG_CONFIG_HOME/aegis/config.json` (defaults to `~/.config/aegis/config.json`). The file is parsed as **[JSON5](https://json5.org)**, so `//` and `/* */` comments and trailing commas are allowed — plain JSON still works unchanged. The same goes for per-project `.aegis.json` override files. On first run aegis writes a commented template you can edit in place.
 
+The generated template hides the common credential directories out of the box:
+
 ```json5
 {
   // Replace $HOME with an empty view on every run (same as --hide-home).
   "hideHomeAlways": false,
+
   // Directories made invisible inside the sandbox. Supports ~.
-  "hide": [],
+  "hide": [
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.config/gcloud",
+    "~/.azure",
+    "~/.kube",
+  ],
+
   // Extra dirs to keep writable beyond cwd + tool config. Supports ~.
+  // Empty by default — see the toolchain cache list below.
   "extraWritable": [],
 }
 ```
 
+> **This is a blocklist, not an allowlist.** Everything *not* listed in `hide` stays readable, because the sandbox mounts the whole filesystem read-only and then subtracts from it. The defaults cover the credential directories that exist today; a tool that starts writing secrets somewhere new is readable until you add it here. If that trade-off doesn't suit you, `--hide-home` / `hideHomeAlways` inverts it — `$HOME` is masked wholesale and only the tool's own config is re-exposed.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `hideHomeAlways` | `boolean` | When `true`, always apply `--hide-home` behavior |
-| `hide` | `string[]` | Directories to always hide (merged with CLI `--hide` flags) |
+| `hide` | `string[]` | Directories to always hide (merged with CLI `--hide` flags). Pre-populated with `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`, `~/.azure`, `~/.kube` |
 | `extraWritable` | `string[]` | Extra directories to keep writable beyond cwd + tool config. Supports `~`. Opt-in escape hatch for tools that write outside the project — build/compiler caches such as `~/Library/Caches`, `~/Library/Developer`, `~/.cargo`, `~/.npm`, `~/go/pkg`. **Security note:** these often live under `$HOME` and may hold credentials, so nothing here is writable unless you add it. Empty by default. |
 
 > **When do you need `extraWritable`?** If a sandboxed tool fails with "operation not permitted" while writing *outside* your project (a compiler populating its cache, a package manager, etc.), add that directory here. Writes to cwd, the tool's own config, `/tmp`/`$TMPDIR`, and the standard device nodes (`/dev/null`, `/dev/urandom`, ptys, …) already work without configuration.
@@ -301,7 +315,7 @@ aegis is one of several tools in this space, and it isn't the first. If it doesn
 
 | Project | Mechanism | Platforms | How it differs |
 |---|---|---|---|
-| [ai-jail](https://github.com/akitaonrails/ai-jail) | bubblewrap + Landlock + seccomp / `sandbox-exec` | Linux, macOS | The closest equivalent to aegis. Adds Landlock, seccomp and copy-on-write overlays; similar agent coverage. |
+| [ai-jail](https://github.com/akitaonrails/ai-jail) | bubblewrap + Landlock + seccomp / `sandbox-exec` | Linux, macOS | The closest equivalent to aegis, and considerably more hardened — Landlock, seccomp, rlimits, network isolation in its lockdown mode, glob-level file masking, and a wider agent list. Its default `$HOME` is a tmpfs with dotdirs layered back on, so work written outside the project does not survive the run. |
 | [cco](https://github.com/nikvdp/cco) | bubblewrap / `sandbox-exec`, Docker fallback | Linux, macOS | Same philosophy, focused on Claude Code, with a Docker fallback path. Bash implementation. |
 | [sandbox-runtime (`srt`)](https://github.com/anthropic-experimental/sandbox-runtime) | bubblewrap + seccomp / Seatbelt / WFP | Linux, macOS, Windows (alpha) | Anthropic's general-purpose sandboxing primitive rather than an agent launcher. **Adds deny-by-default network egress with domain allowlists.** |
 | [Agent Safehouse](https://github.com/eugene1g/agent-safehouse) | `sandbox-exec` | macOS only | Deny-first with composable per-agent policy profiles; more granular, no Linux backend. |
