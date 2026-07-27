@@ -70,6 +70,7 @@ aegis <tool> [flags] [tool-args...]
 | `--dry-run` | Print the sandbox command as JSON without executing it (bwrap argv on Linux, `sandbox-exec -p <profile>` on macOS) |
 | `--hide-home` | Replace `$HOME` with an empty tmpfs, preserving only the tool's config paths |
 | `--hide <dir>` | Hide a specific directory inside the sandbox (repeatable, supports `--hide=<dir>`) |
+| `-w, --writable <dir>` | Allow write access to a directory beyond cwd and tool config (repeatable, supports `--writable=<dir>`). CLI counterpart of the `extraWritable` config key — useful for build/compiler caches a tool writes outside the project |
 
 Aegis flags are consumed by aegis and **not** forwarded to the wrapped tool. Everything else is passed through.
 
@@ -84,6 +85,9 @@ aegis claude --hide-home "write a test for main.ts"
 
 # Hide specific directories
 aegis gemini --hide ~/.ssh --hide ~/.aws "refactor the auth module"
+
+# Allow write access to a build cache outside the project
+aegis codex -w ~/.cargo/registry --writable ~/Library/Caches/go-build "build it"
 
 # Preview the bwrap command without running it
 aegis codex --dry-run --hide-home
