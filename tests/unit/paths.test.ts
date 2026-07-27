@@ -7,11 +7,14 @@ import { Result } from "typescript-result";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { symlink } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import {
   resolveAbsolutePath,
   assertDirectory,
   assertExists,
   resolveAndValidateHidePath,
+  resolveExecChain,
 } from "../../src/fs/paths";
 
 describe("resolveAbsolutePath", () => {
@@ -248,5 +251,101 @@ describe("resolveAndValidateHidePath", () => {
     Result.assertError(result);
     // Should mention the path and that it's not a directory
     expect(result.error.message).toContain(filePath);
+  });
+});
+
+describe("resolveExecChain", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    // realpath the base: on macOS the temp dir sits under /var, itself a
+    // symlink to /private/var, which the resolver would correctly report as
+    // a hop and drown out the layout each test is actually asserting on.
+    tempDir = realpathSync(await mkdtemp(join(tmpdir(), "aegis-chain-")));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("a plain file resolves to itself", async () => {
+    const file = join(tempDir, "tool");
+    await writeFile(file, "");
+
+    expect(resolveExecChain(file)).toEqual([{ kind: "file", path: file }]);
+  });
+
+  test("one hop keeps the launcher and the file behind it", async () => {
+    // Mirrors claude: ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>
+    const real = join(tempDir, "share/claude/versions/1.0.0/claude");
+    const launcher = join(tempDir, "bin/claude");
+    await mkdir(join(tempDir, "share/claude/versions/1.0.0"), { recursive: true });
+    await mkdir(join(tempDir, "bin"), { recursive: true });
+    await writeFile(real, "");
+    await symlink(real, launcher);
+
+    expect(resolveExecChain(launcher)).toEqual([
+      { kind: "symlink", path: launcher, target: real },
+      { kind: "file", path: real },
+    ]);
+  });
+
+  test("captures a symlinked directory component mid-path", async () => {
+    // Mirrors codex, whose chain runs through a "current" directory symlink.
+    // realpath() collapses this hop away, but it still has to exist inside
+    // the sandbox for the path to resolve.
+    const release = join(tempDir, "releases/0.1.0");
+    const current = join(tempDir, "current");
+    const launcher = join(tempDir, "bin/codex");
+    await mkdir(join(release, "bin"), { recursive: true });
+    await mkdir(join(tempDir, "bin"), { recursive: true });
+    await writeFile(join(release, "bin/codex"), "");
+    await symlink(release, current);
+    await symlink(join(current, "bin/codex"), launcher);
+
+    expect(resolveExecChain(launcher)).toEqual([
+      { kind: "symlink", path: launcher, target: join(current, "bin/codex") },
+      { kind: "symlink", path: current, target: release },
+      { kind: "file", path: join(release, "bin/codex") },
+    ]);
+  });
+
+  test("preserves relative link targets verbatim", async () => {
+    // The raw target is what gets recreated inside the sandbox, so a relative
+    // link must stay relative — rewriting it to an absolute path would point
+    // outside the layout the tool was installed with.
+    const real = join(tempDir, "tool-1.0");
+    const launcher = join(tempDir, "tool");
+    await writeFile(real, "");
+    await symlink("tool-1.0", launcher);
+
+    expect(resolveExecChain(launcher)).toEqual([
+      { kind: "symlink", path: launcher, target: "tool-1.0" },
+      { kind: "file", path: real },
+    ]);
+  });
+
+  test("returns what resolved so far when the target is missing", async () => {
+    const launcher = join(tempDir, "dangling");
+    await symlink(join(tempDir, "nope"), launcher);
+
+    expect(resolveExecChain(launcher)).toEqual([
+      { kind: "symlink", path: launcher, target: join(tempDir, "nope") },
+    ]);
+  });
+
+  test("terminates on a symlink cycle", async () => {
+    const a = join(tempDir, "a");
+    const b = join(tempDir, "b");
+    await symlink(b, a);
+    await symlink(a, b);
+
+    const chain = resolveExecChain(a);
+    expect(chain.every((e) => e.kind === "symlink")).toBe(true);
+    expect(chain.length).toBeLessThanOrEqual(2);
+  });
+
+  test("a nonexistent path yields no entries", () => {
+    expect(resolveExecChain(join(tempDir, "absent"))).toEqual([]);
   });
 });

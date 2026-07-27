@@ -104,6 +104,30 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
     args.push("--ro-bind", ov.source, ov.target);
   }
 
+  // 5d. Tool binary carve-out — MUST come after the tmpfs and the hide
+  //     overlays so the tool stays executable even when it lives inside a
+  //     masked region. Real installers put both the launcher and its target
+  //     under $HOME, and a tmpfs does not hide those paths so much as delete
+  //     them, so exec dies with ENOENT unless each hop is restored.
+  //
+  //     Symlinks are recreated as symlinks (rather than binding the resolved
+  //     file onto the launcher path) so a tool that inspects its own realpath
+  //     to find adjacent resources still sees the layout it was installed
+  //     with. Paths outside every masked region are skipped — those are
+  //     already visible through the read-only root bind.
+  const isMasked = (p: string): boolean =>
+    (opts.hideHome && p.startsWith(opts.home + "/")) ||
+    opts.hidePaths.some(h => p === h || p.startsWith(h + "/"));
+
+  for (const entry of opts.toolChain) {
+    if (!isMasked(entry.path)) continue;
+    if (entry.kind === "symlink") {
+      args.push("--symlink", entry.target, entry.path);
+    } else {
+      args.push("--ro-bind", entry.path, entry.path);
+    }
+  }
+
   // 6. Tool execution
   args.push("--", opts.toolPath, ...opts.toolArgs);
 

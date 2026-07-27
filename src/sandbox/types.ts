@@ -4,6 +4,7 @@
  */
 import type { CliDef } from "../types";
 import type { ResolvedOverride } from "../config/overrides";
+import type { ExecChainEntry } from "../fs/paths";
 
 export interface SandboxOptions {
   /** Current working directory */
@@ -14,6 +15,13 @@ export interface SandboxOptions {
   cliDef: CliDef;
   /** Absolute path to the tool executable */
   toolPath: string;
+  /**
+   * Every hop involved in resolving `toolPath` — the symlinks and the regular
+   * file behind them. Both backends carve these out of masked regions so the
+   * tool can still be exec'd when it is installed under a hidden $HOME.
+   * Pass [] to skip the carve-out.
+   */
+  toolChain: ExecChainEntry[];
   /** Arguments to pass to the tool */
   toolArgs: string[];
   /** Whether to use hide-home mode */

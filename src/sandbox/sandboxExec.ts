@@ -138,6 +138,21 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
   //    under a denied subtree (e.g. a hidden $HOME).
   lines.push(`(allow file-read* process-exec ${literal(opts.toolPath)})`);
 
+  // 7b. Seatbelt resolves the whole path at exec time, so a tool reached
+  //     through symlinks needs each hop allowed — permitting only the
+  //     launcher leaves the file behind it denied. Restricted to hops that
+  //     actually fall inside a masked region: everything else is already
+  //     readable under (allow default), and emitting redundant allow rules
+  //     only widens the profile for no benefit.
+  const isMasked = (p: string): boolean =>
+    (opts.hideHome && p.startsWith(opts.home + "/")) ||
+    opts.hidePaths.some((h) => p === h || p.startsWith(h + "/"));
+
+  for (const entry of opts.toolChain) {
+    if (entry.path === opts.toolPath || !isMasked(entry.path)) continue;
+    lines.push(`(allow file-read* process-exec ${literal(entry.path)})`);
+  }
+
   return lines.join("\n") + "\n";
 }
 

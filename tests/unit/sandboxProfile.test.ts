@@ -22,6 +22,7 @@ function makeOpts(overrides: Partial<SandboxOptions> = {}): SandboxOptions {
     home: "/Users/user",
     cliDef: findCli("cc"),
     toolPath: "/usr/local/bin/claude",
+    toolChain: [],
     toolArgs: ["--version"],
     hideHome: false,
     hidePaths: [],
@@ -223,6 +224,61 @@ describe("buildSandboxProfile — tool binary carve-out", () => {
     const lines = p.trimEnd().split("\n");
     expect(lines[lines.length - 1]).toBe(
       '(allow file-read* process-exec (literal "/opt/homebrew/bin/claude"))'
+    );
+  });
+
+  // A tool reached through symlinks needs every hop allowed: Seatbelt
+  // resolves the whole path at exec time, so permitting only the launcher
+  // leaves the file behind it denied under a masked $HOME.
+  const chain = [
+    {
+      kind: "symlink" as const,
+      path: "/Users/user/.local/bin/claude",
+      target: "/Users/user/.local/share/claude/versions/1.0.0",
+    },
+    {
+      kind: "file" as const,
+      path: "/Users/user/.local/share/claude/versions/1.0.0",
+    },
+  ];
+
+  test("allows every hop of the chain under a hidden home", () => {
+    const p = buildSandboxProfile(
+      makeOpts({
+        toolPath: "/Users/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: true,
+      })
+    );
+    expect(p).toContain(
+      '(allow file-read* process-exec (literal "/Users/user/.local/share/claude/versions/1.0.0"))'
+    );
+  });
+
+  test("emits no extra hops when nothing is masked", () => {
+    const p = buildSandboxProfile(
+      makeOpts({
+        toolPath: "/Users/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: false,
+      })
+    );
+    // Already readable under (allow default) — a redundant allow rule would
+    // only widen the profile.
+    expect(p).not.toContain("versions/1.0.0");
+  });
+
+  test("covers hops hidden by an explicit --hide rather than hide-home", () => {
+    const p = buildSandboxProfile(
+      makeOpts({
+        toolPath: "/Users/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: false,
+        hidePaths: ["/Users/user/.local/share"],
+      })
+    );
+    expect(p).toContain(
+      '(allow file-read* process-exec (literal "/Users/user/.local/share/claude/versions/1.0.0"))'
     );
   });
 });

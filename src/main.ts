@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadConfig, validateHidePaths, expandHidePaths, expandUserPaths } from "./config/config";
+import { resolveExecChain } from "./fs/paths";
 import {
   loadProjectOverrides,
   resolveOverrides,
@@ -197,6 +198,7 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
           home,
           cliDef,
           toolPath,
+          toolChain: resolveExecChain(toolPath),
           toolArgs,
           hideHome,
           hidePaths: allHidePaths,

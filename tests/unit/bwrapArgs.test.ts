@@ -25,6 +25,7 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
     home: "/home/user",
     cliDef: findCli("cc"),
     toolPath: "/usr/bin/claude",
+    toolChain: [],
     toolArgs: ["--version"],
     hideHome: false,
     hidePaths: [],
@@ -1219,5 +1220,97 @@ describe("buildBwrapCommand", () => {
     const parsed = JSON.parse(json);
     expect(parsed.cmd).toBe("bwrap");
     expect(Array.isArray(parsed.args)).toBe(true);
+  });
+});
+
+describe("buildBwrapArgs — tool binary carve-out", () => {
+  // Real installers put both the launcher and its target under $HOME.
+  // --tmpfs $HOME does not hide those paths so much as delete them, so exec
+  // dies with ENOENT unless each hop is restored after the tmpfs.
+  const chain = [
+    {
+      kind: "symlink" as const,
+      path: "/home/user/.local/bin/claude",
+      target: "/home/user/.local/share/claude/versions/1.0.0",
+    },
+    {
+      kind: "file" as const,
+      path: "/home/user/.local/share/claude/versions/1.0.0",
+    },
+  ];
+
+  test("recreates symlinks and binds the file behind them under hide-home", () => {
+    const result = buildBwrapArgs(
+      makeOpts({
+        toolPath: "/home/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: true,
+      })
+    );
+    Result.assertOk(result);
+
+    expect(
+      containsSequence(result.value, [
+        "--symlink",
+        "/home/user/.local/share/claude/versions/1.0.0",
+        "/home/user/.local/bin/claude",
+      ])
+    ).toBe(true);
+    expect(
+      containsSequence(result.value, [
+        "--ro-bind",
+        "/home/user/.local/share/claude/versions/1.0.0",
+        "/home/user/.local/share/claude/versions/1.0.0",
+      ])
+    ).toBe(true);
+  });
+
+  test("carve-out comes after the tmpfs that would otherwise erase it", () => {
+    const result = buildBwrapArgs(
+      makeOpts({
+        toolPath: "/home/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: true,
+      })
+    );
+    Result.assertOk(result);
+
+    const tmpfsHome = result.value.findIndex(
+      (a, i) => a === "--tmpfs" && result.value[i + 1] === "/home/user"
+    );
+    const symlink = result.value.indexOf("--symlink");
+    expect(tmpfsHome).toBeGreaterThanOrEqual(0);
+    expect(symlink).toBeGreaterThan(tmpfsHome);
+  });
+
+  test("emits nothing when the chain is not masked", () => {
+    const result = buildBwrapArgs(
+      makeOpts({
+        toolPath: "/home/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: false,
+      })
+    );
+    Result.assertOk(result);
+    expect(result.value).not.toContain("--symlink");
+  });
+
+  test("covers hops hidden by an explicit --hide rather than hide-home", () => {
+    const result = buildBwrapArgs(
+      makeOpts({
+        toolPath: "/home/user/.local/bin/claude",
+        toolChain: chain,
+        hideHome: false,
+        hidePaths: ["/home/user/.local/share"],
+      })
+    );
+    Result.assertOk(result);
+    expect(
+      containsSequence(result.value, [
+        "--ro-bind",
+        "/home/user/.local/share/claude/versions/1.0.0",
+        "/home/user/.local/share/claude/versions/1.0.0",
+      ])
+    ).toBe(true);
   });
 });
