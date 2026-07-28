@@ -842,7 +842,7 @@ describe("dry-run config integration", () => {
     expect(foundHomeTmpfs).toBe(true);
   });
 
-  test("homeAccess allowlist masks home, RO-binds allowRead, and ignores config.hide", async () => {
+  test("homeAccess allowlist masks home, RO-binds allowRead, and still applies config.hide", async () => {
     const readable = join(tempHome, "readable");
     const legacyHide = join(tempHome, "legacy-hide");
     await mkdir(readable, { recursive: true });
@@ -869,7 +869,10 @@ ${CLAUDE_TOOL_TOML}`
     const args = output?.args ?? [];
     expect(containsSequence(args, ["--tmpfs", tempHome])).toBe(true);
     expect(containsSequence(args, ["--ro-bind", readable, readable])).toBe(true);
-    expect(args).not.toContain(legacyHide);
+    // The mask already covers this entry, so the overlay is redundant here —
+    // but hide is applied in both modes on purpose, so that allowlist mode can
+    // never silently loosen an explicit deny. See the rationale in main.ts.
+    expect(args).toContain(legacyHide);
   });
 
   test("merges config.hide with CLI --hide", async () => {
