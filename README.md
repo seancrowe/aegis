@@ -2,6 +2,10 @@
 
 Sandboxed runner for AI CLI tools. Wraps tools like Claude Code, Codex, Gemini CLI, and others inside an OS sandbox so they can only see what you allow — [bubblewrap](https://github.com/containers/bubblewrap) on Linux, `sandbox-exec` (Seatbelt) on macOS. The backend is selected automatically by platform; the same model, config, and flags apply to both.
 
+> **A personal project.** aegis is built around one developer's daily workflow rather than shipped as a product, so expect opinionated defaults and the occasional breaking change. Use it, fork it, remix it — it's [MIT](LICENSE)-licensed. If it doesn't fit the way you work, the [Similar projects](#similar-projects) tables below cover a dozen-plus alternatives, and one of them likely will.
+>
+> **Windows: sorry, not supported.** Please use [WSL](https://learn.microsoft.com/windows/wsl/install) and run aegis on the Linux bubblewrap backend.
+
 > **Status: experimental.** The interface and config format may still change without notice, and the security model has not been independently audited. That said, this is not abandonware — it's used daily as the author's primary way of running AI coding agents, on both Linux and macOS. Read the [Threat model](#threat-model) before relying on it for anything you'd consider high-stakes.
 
 ## Why
