@@ -15,6 +15,7 @@
     "test:integration": "bun test tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts tests/integration/metaCommands.test.ts",
     "test:all": "bun run scripts/test.ts all",
     "test:docker": "bun run scripts/test.ts docker",
+    "test:local-linux": "bun run scripts/test.ts local-linux",
     "test:layer3": "bun run scripts/test.ts layer3",
     "test:layer3m": "bun run scripts/test.ts layer3m",
     "test:layer4": "bun run scripts/test.ts layer4"

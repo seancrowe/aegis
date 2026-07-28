@@ -11,11 +11,12 @@
  *
  * Layers:
  *   local       Run L1/L2 tests locally (default if no layers specified)
+ *   local-linux Run L1/L2 on Linux in Docker (skipped on a Linux host)
  *   layer3      Run L3 bwrap semantic tests in Docker
  *   layer3m     Run L3m sandbox-exec semantic tests natively on macOS
  *   layer4      Run L4 e2e tests in Docker
  *   docker      Run L3 + L4 in Docker
- *   all         Run all layers (local + L3m + docker)
+ *   all         Run all layers (local + local-linux + L3m + docker)
  *
  * Examples:
  *   bun run scripts/test.ts              # Run L1/L2 locally
@@ -86,11 +87,12 @@ ${colors.yellow}Options:${colors.reset}
 
 ${colors.yellow}Layers:${colors.reset}
   local       Run L1/L2 tests locally (default)
+  local-linux Run L1/L2 on Linux in Docker (skipped on a Linux host)
   layer3      Run L3 bwrap semantic tests in Docker
   layer3m     Run L3m sandbox-exec semantic tests natively on macOS
   layer4      Run L4 e2e tests in Docker
   docker      Run L3 + L4 in Docker
-  all         Run all layers (local + L3m + docker)
+  all         Run all layers (local + local-linux + L3m + docker)
 
 ${colors.yellow}Examples:${colors.reset}
   bun run scripts/test.ts              # Run L1/L2 locally
@@ -165,23 +167,40 @@ async function checkDockerRunning(): Promise<{ running: boolean; error?: string 
   }
 }
 
+const DOCKER_LAYERS = {
+  // The L1/L2 suite again, on Linux. Most of tests/integration asserts bwrap
+  // argv and so skips on non-Linux (see the platform guard at the top of
+  // dryRun.test.ts), which means a macOS-only run reports green on changes it
+  // never executed. This is the same image and command CI's "Layer 1 and
+  // Layer 2" step runs, so the gap closes before the push rather than after.
+  "local-linux": {
+    name: "Layer 1 + 2 (Linux)",
+    dockerfile: "tests/docker/Dockerfile",
+    image: "aegis-local-linux-tests",
+    privileged: false,
+  },
+  layer3: {
+    name: "Layer 3 (bwrap semantic)",
+    dockerfile: "tests/docker/Dockerfile.layer3",
+    image: "aegis-layer3-tests",
+    privileged: true,
+  },
+  layer4: {
+    name: "Layer 4 (e2e)",
+    dockerfile: "tests/docker/Dockerfile.layer4",
+    image: "aegis-layer4-tests",
+    privileged: true,
+  },
+} as const;
+
+type DockerLayer = keyof typeof DOCKER_LAYERS;
+
 async function runDockerTests(
-  layer: "layer3" | "layer4",
+  layer: DockerLayer,
   showLogs: boolean
 ): Promise<TestResult> {
   const start = Date.now();
-  const config = {
-    layer3: {
-      name: "Layer 3 (bwrap semantic)",
-      dockerfile: "tests/docker/Dockerfile.layer3",
-      image: "aegis-layer3-tests",
-    },
-    layer4: {
-      name: "Layer 4 (e2e)",
-      dockerfile: "tests/docker/Dockerfile.layer4",
-      image: "aegis-layer4-tests",
-    },
-  }[layer];
+  const config = DOCKER_LAYERS[layer];
 
   log("blue", `\n=== Running ${config.name} in Docker ===\n`);
 
@@ -203,10 +222,11 @@ async function runDockerTests(
     log("yellow", "Building Docker image...");
     await $`docker build -f ${config.dockerfile} -t ${config.image} .`.quiet();
 
-    // Run tests in Docker
-    // Use --privileged for bwrap to work
+    // Run tests in Docker. bwrap needs --privileged; the L1/L2 suite does not,
+    // and withholding it keeps that run closer to how CI executes the suite.
     log("yellow", "Running tests...");
-    const result = await $`docker run --rm --privileged ${config.image}`.quiet();
+    const privileged = config.privileged ? ["--privileged"] : [];
+    const result = await $`docker run --rm ${privileged} ${config.image}`.quiet();
     const output = result.text();
 
     if (showLogs) {
@@ -243,6 +263,24 @@ async function runDockerTests(
       duration: Date.now() - start,
     };
   }
+}
+
+/**
+ * On a Linux host the native `local` run already executed this suite against
+ * this kernel, so the container would only repeat it. Record a visible skip —
+ * the same convention Layer 3m uses — rather than dropping the layer silently.
+ */
+async function runLocalLinuxTests(showLogs: boolean): Promise<TestResult> {
+  const { name } = DOCKER_LAYERS["local-linux"];
+
+  if (process.platform === "linux") {
+    log("blue", `\n=== ${name} ===\n`);
+    const reason = "SKIP: the local L1/L2 run already covered Linux natively.";
+    log("yellow", reason);
+    return { layer: name, success: true, skipped: true, output: reason, duration: 0 };
+  }
+
+  return runDockerTests("local-linux", showLogs);
 }
 
 async function runMacSemanticTests(): Promise<TestResult> {
@@ -352,6 +390,7 @@ async function main() {
     switch (layer) {
       case "all":
         expandedLayers.add("local");
+        expandedLayers.add("local-linux");
         expandedLayers.add("layer3");
         expandedLayers.add("layer3m");
         expandedLayers.add("layer4");
@@ -370,6 +409,10 @@ async function main() {
   // Run local tests if requested
   if (expandedLayers.has("local")) {
     results.push(await runLocalTests(args.logs));
+  }
+
+  if (expandedLayers.has("local-linux")) {
+    results.push(await runLocalLinuxTests(args.logs));
   }
 
   // Run Docker tests if requested

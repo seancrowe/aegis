@@ -31,6 +31,13 @@ bun run scripts/test.ts docker
 bun run test:layer3m
 ```
 
+**Developing on macOS:** most of `tests/integration` asserts the bwrap argv and
+therefore skips on a non-Linux host, so a green local run says nothing about
+changes to the Linux backend. `bun run test:local-linux` re-runs the same L1/L2
+suite inside the container CI uses, which is the cheapest way to find out before
+pushing rather than after. It is part of `scripts/test.ts all`, and skips itself
+on a Linux host, where the plain `local` run already covers it.
+
 **Note:** Use `bun run test` (not `bun test`) to run the configured local suite. It includes L1/L2 and L3m; L3m records visible skips when native Seatbelt execution is unavailable. Direct `bun test` will attempt to run all test files including Docker-only tests.
 
 ## Running Tests
@@ -157,11 +164,12 @@ bun run scripts/test.ts [options] [layers...]
 | Layer | Description |
 |-------|-------------|
 | `local` | Run L1/L2 tests locally (default) |
+| `local-linux` | Run L1/L2 on Linux in Docker (skipped on a Linux host) |
 | `layer3` | Run L3 bwrap semantic tests in Docker |
 | `layer3m` | Run L3m sandbox-exec semantic tests natively |
 | `layer4` | Run L4 e2e tests in Docker |
 | `docker` | Run L3 + L4 in Docker |
-| `all` | Run all layers (local + L3m + docker) |
+| `all` | Run all layers (local + local-linux + L3m + docker) |
 
 ### Examples
 
@@ -172,6 +180,7 @@ bun run scripts/test.ts --logs all   # Run all with detailed output
 bun run scripts/test.ts layer3       # Run only L3 in Docker
 bun run scripts/test.ts layer3m      # Run only L3m natively
 bun run scripts/test.ts docker       # Run L3 + L4 in Docker
+bun run scripts/test.ts local-linux  # Re-run L1/L2 on Linux before pushing
 ```
 
 ## NPM Scripts
@@ -184,6 +193,7 @@ bun run test:unit      # Run only unit tests
 bun run test:integration # Run local integration tests
 bun run test:all       # Run all layers
 bun run test:docker    # Run L3 + L4 in Docker
+bun run test:local-linux # Re-run L1/L2 on Linux in Docker
 bun run test:layer3    # Run L3 in Docker
 bun run test:layer3m   # Run L3m natively on macOS
 bun run test:layer4    # Run L4 in Docker

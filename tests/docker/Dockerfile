@@ -23,5 +23,8 @@ RUN bun install --frozen-lockfile || bun install
 # Copy the rest of the application
 COPY . .
 
-# Default command runs Layer 1 + Layer 2 tests
-CMD ["bun", "test", "tests/unit", "tests/integration/dryRun.test.ts", "tests/integration/configPersistence.test.ts"]
+# Default command runs Layer 1 + Layer 2 tests.
+# Deliberately `bun run test` rather than a second copy of the file list: this
+# image exists to reproduce CI's "Layer 1 and Layer 2" step, which runs that
+# same script, so an added suite must not be able to reach one and not the other.
+CMD ["bun", "run", "test"]
