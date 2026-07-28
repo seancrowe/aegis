@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            semantic_layer: layer3
+          - os: macos-latest
+            semantic_layer: layer3m
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Keep CI reproducible and synchronized with package.json engines.bun.
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      - name: Layer 1 and Layer 2
+        run: bun run test
+
+      # Ubuntu's AppArmor policy blocks bwrap's uid-map setup even for a
+      # privileged container; the Docker daemon's host kernel owns this switch.
+      - name: Allow unprivileged user namespaces for Layer 3
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Layer 3 (Linux bwrap in Docker)
+        if: matrix.semantic_layer == 'layer3'
+        run: bun run scripts/test.ts --logs layer3
+
+      # The Layer 3m guard skips when sandbox-exec cannot apply a profile, which
+      # is correct locally (an agent shell is often already sandboxed) but wrong
+      # for CI: a skipped suite would exit 0 and report macOS as green while
+      # testing nothing. Fail here instead, so "Seatbelt does not work on the
+      # runner" is a visible result rather than a silent absence of coverage.
+      - name: Verify Seatbelt is usable on the runner
+        if: matrix.semantic_layer == 'layer3m'
+        run: |
+          if ! sandbox-exec -p '(version 1)(allow default)' /usr/bin/true; then
+            echo "::error::sandbox-exec cannot apply a profile on this runner; Layer 3m would silently skip."
+            exit 1
+          fi
+
+      - name: Layer 3m (native macOS Seatbelt)
+        if: matrix.semantic_layer == 'layer3m'
+        run: bun run scripts/test.ts --logs layer3m
+
+      # Layer 4 stays local-only because it needs real agent CLIs and credentials.

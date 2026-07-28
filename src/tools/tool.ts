@@ -53,6 +53,6 @@ export function filterAegisFlags(args: string[]): string[] {
 /**
  * Get CLI definition by subCommand.
  */
-export function getCliDef(subCommand: string, clis: CliDef[]): CliDef | undefined {
-  return clis.find(c => c.subCommand === subCommand);
+export function getCliDef(subCommand: string, tools: CliDef[]): CliDef | undefined {
+  return tools.find(c => c.subCommand === subCommand);
 }

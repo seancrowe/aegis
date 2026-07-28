@@ -4,6 +4,7 @@
 import { resolve, normalize, isAbsolute, dirname, join } from "node:path";
 import { existsSync, statSync, lstatSync, readlinkSync } from "node:fs";
 import { Result } from "typescript-result";
+import { validatePolicyPath } from "../config/policyPath";
 
 /**
  * One step in the resolution of an executable path: either a symlink that has
@@ -142,12 +143,19 @@ export function assertExists(path: string): Result<void, Error> {
 
 /**
  * Resolve and validate a hide path.
- * Combines resolution to absolute and directory validation.
+ * Policy checks intentionally inspect the raw spelling before resolution and
+ * before probing the filesystem, then the accepted path is made absolute and
+ * checked as an existing directory.
  */
 export function resolveAndValidateHidePath(
   input: string,
   cwd: string
 ): Result<string, Error> {
+  // validatePolicyPath rejects control characters itself, so this single call
+  // covers both policy checks. Hide paths may be cwd-relative.
+  const policy = validatePolicyPath(input, "hide", { allowRelative: true });
+  if (!policy.ok) return Result.error(policy.error);
+
   const resolved = resolveAbsolutePath(input, cwd);
   if (!resolved.ok) return resolved;
 

@@ -6,7 +6,7 @@
  *   --bind CWD CWD       -> (allow file-read* file-write* (subpath CWD))
  *   --bind ~/.claude ... -> (allow file-read* file-write* (subpath ...))   [rwPaths]
  *   --ro-bind EMPTY HIDE -> (deny file-read* file-write* (subpath HIDE))   [hidePaths/masks]
- *   --tmpfs $HOME        -> (deny file-read* (subpath $HOME)) + re-allows   [hideHome]
+ *   masked $HOME         -> (deny file-read* file-write* ...) + re-allows   [hideHome]
  *   --tmpfs /tmp         -> (allow file-write* (subpath /tmp …))           [tmpPaths]
  *
  * Note the /tmp mapping is NOT isolation: bwrap mounts a private tmpfs, while
@@ -21,6 +21,10 @@ import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { SandboxOptions, SandboxCommand } from "./types";
+import {
+  canonicalPathSpellings,
+  makeIsPathMasked,
+} from "./masking";
 
 /**
  * Escape a path for safe interpolation inside an SBPL string literal.
@@ -39,6 +43,19 @@ function subpath(path: string): string {
 /** Emit a `(literal "…")` filter line, escaped. */
 function literal(path: string): string {
   return `(literal "${sbplEscape(path)}")`;
+}
+
+/**
+ * Return both forms Seatbelt may need to deny for a user-written path.
+ *
+ * Like resolveTmpPaths() below, this accounts for Seatbelt comparing the
+ * kernel-resolved path. Keeping the written form and adding its realpath is
+ * intentionally additive for a deny: it can only hide more, never grant
+ * access. Resolution is best-effort because a configured path may disappear
+ * before the profile is built.
+ */
+function denyPaths(path: string): string[] {
+  return canonicalPathSpellings(path);
 }
 
 /**
@@ -90,17 +107,67 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
   lines.push(`(allow file-write* (subpath "/dev/fd"))`);
   lines.push(`(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`);
 
-  // 3. hide-home: deny reads under $HOME to emulate an empty tmpfs $HOME.
-  //    Writable rwPaths and cwd are re-allowed below (last-match-wins).
+  // 3. A masked home is empty AND unwritable: reads are denied so the contents
+  //    are invisible, and writes fail immediately rather than being accepted
+  //    and discarded at exit (the Linux backend still does the latter — see the
+  //    TODO in bwrap.ts). The write deny is stated here rather than left to the
+  //    global (deny file-write*) above, so relaxing that global default cannot
+  //    silently start letting writes through a masked home.
+  //    cwd, rwPaths, extraWritable and tmpPaths are re-allowed below and win
+  //    under last-match.
+  //    INVARIANT: every spelling denied here must have its re-allows emitted at
+  //    the same spelling (see section 4) — Seatbelt matches the kernel-resolved
+  //    path, so a deny at the realpath with an allow only at the written form
+  //    locks the tool out of its own config directory.
+  const homeSpellings = denyPaths(opts.home);
   if (opts.hideHome) {
-    lines.push(`(deny file-read* ${subpath(opts.home)})`);
+    for (const path of homeSpellings) {
+      lines.push(`(deny file-read* file-write* ${subpath(path)})`);
+    }
+    // 3a. When $HOME is itself reached through a symlink, the deny above covers
+    //     the link NODE, so the kernel cannot even readlink() it and every path
+    //     beneath resolves to ENOTDIR — including the rwPath allows emitted in
+    //     section 4, which are then never reached. Re-allow metadata on the
+    //     link itself (not its contents) so traversal can proceed, mirroring
+    //     the exec-chain carve-out at the end of this function. Reading a
+    //     symlink discloses only its target, never the masked directory.
+    //     denyPaths returns [written, canonical] and collapses to a single
+    //     entry when they match, so a second entry is exactly the signal that
+    //     the written spelling is a link.
+    if (homeSpellings.length > 1) {
+      lines.push(`(allow file-read-metadata ${literal(homeSpellings[0]!)})`);
+    }
+  }
+
+  // 3b. Read-only carve-outs follow the broad home deny but precede every
+  // explicit hide/override deny, preserving least privilege under Seatbelt's
+  // last-match-wins evaluation. Emitting these even without hideHome keeps
+  // --hide-home and config allowlist behavior on the same policy path.
+  for (const p of opts.allowRead) {
+    lines.push(`(allow file-read* ${subpath(p)})`);
   }
 
   // 4. Writable paths: cwd + tool config (rwPaths). file/dir kind is irrelevant
   //    here — there are no mounts, so the atomic-write concern from bwrap is moot.
+  //
+  //    rwPaths are emitted at EVERY spelling `homeSpellings` denies, reusing
+  //    that exact array so the deny loop above and this allow loop cannot drift
+  //    apart. Anything less and a symlinked $HOME (/var -> /private/var) denies
+  //    at the resolved path while allowing only at the written one.
+  //
+  //    opts.cwd needs no such treatment: it comes from process.cwd(), which the
+  //    kernel already returns fully resolved.
+  //
+  //    Deliberately NOT extended to allowRead / extraWritable. Tilde-spelled
+  //    entries there are home-derived too (expandUserPaths joins them against
+  //    the un-realpathed $HOME) and hit the identical mismatch — this exclusion
+  //    is a choice, not an oversight. Unlike rwPaths, which aegis derives from
+  //    the tool catalog, the user wrote those spellings, and the README's
+  //    documented policy is that aegis does not silently rewrite user-written
+  //    paths: configure the real path instead.
   const writable: string[] = [opts.cwd];
   for (const rp of opts.cliDef.rwPaths) {
-    writable.push(join(opts.home, rp.path));
+    for (const h of homeSpellings) writable.push(join(h, rp.path));
   }
   for (const p of writable) {
     lines.push(`(allow file-read* file-write* ${subpath(p)})`);
@@ -124,14 +191,18 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
 
   // 5. Hidden credential dirs.
   for (const hidePath of opts.hidePaths) {
-    lines.push(`(deny file-read* file-write* ${subpath(hidePath)})`);
+    for (const path of denyPaths(hidePath)) {
+      lines.push(`(deny file-read* file-write* ${subpath(path)})`);
+    }
   }
 
   // 6. Masking overrides. Substitution overrides (those with a real source
   //    file) are rejected earlier by the backend; only masks reach here, so we
   //    deny the target regardless of `source`.
   for (const ov of [...opts.cwdOverrides, ...opts.projectOverrides]) {
-    lines.push(`(deny file-read* file-write* ${subpath(ov.target)})`);
+    for (const path of denyPaths(ov.target)) {
+      lines.push(`(deny file-read* file-write* ${subpath(path)})`);
+    }
   }
 
   // 7. Keep the harness binary itself readable/executable even if it lives
@@ -144,9 +215,7 @@ export function buildSandboxProfile(opts: SandboxOptions): string {
   //     actually fall inside a masked region: everything else is already
   //     readable under (allow default), and emitting redundant allow rules
   //     only widens the profile for no benefit.
-  const isMasked = (p: string): boolean =>
-    (opts.hideHome && p.startsWith(opts.home + "/")) ||
-    opts.hidePaths.some((h) => p === h || p.startsWith(h + "/"));
+  const isMasked = makeIsPathMasked(opts);
 
   for (const entry of opts.toolChain) {
     if (entry.path === opts.toolPath || !isMasked(entry.path)) continue;

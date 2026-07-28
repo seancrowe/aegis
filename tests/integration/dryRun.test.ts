@@ -14,10 +14,63 @@ import { spawn } from "bun";
 const describe = process.platform === "linux" ? _describe : _describe.skip;
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
+const CLAUDE_TOOL_TOML = `
+[tools.cc]
+name = "claude code"
+cliCmd = "claude"
+yoloArg = "--dangerously-skip-permissions"
+rwDirs = [".claude"]
+rwFiles = [".claude.json"]
+`;
+const REJECTED_WRITABLE_PATHS = [
+  "~", "~/", "~/.", "~/./", "~//", "~/..", "~/../..", "~/x/../",
+  "~/a/..//", "~/../shared", "~//../etc", "~//../../etc",
+  "~///../../../tmp", "/", "/Users/../..", "foo", "../../..",
+];
+const ACCEPTED_WRITABLE_PATHS = [
+  "~/.npm",
+  "~/a/../b",
+  "~/Library/Caches",
+  "~/foo/",
+  "/Users/user",
+  "/opt/cache",
+];
 
 interface DryRunOutput {
   cmd: string;
   args: string[];
+}
+
+function containsSequence(values: string[], sequence: string[]): boolean {
+  return values.some((_, index) =>
+    sequence.every((value, offset) => values[index + offset] === value)
+  );
+}
+
+/**
+ * Build the child-process environment for a spawned aegis run.
+ *
+ * Tests routinely override only HOME, expecting the child to be fully
+ * isolated from the developer's machine. But aegis resolves its config
+ * directory from XDG_CONFIG_HOME, and loadConfig() scaffolds a config file
+ * when none exists -- so a developer with XDG_CONFIG_HOME exported in their
+ * shell would have these tests read from (and write into) their real config
+ * directory. Derive XDG_CONFIG_HOME from the overridden HOME so that
+ * "override HOME" means what every call site already assumes it means.
+ *
+ * An explicit XDG_CONFIG_HOME from the caller always wins.
+ */
+export function buildChildEnv(
+  env: Record<string, string>
+): Record<string, string | undefined> {
+  const merged: Record<string, string | undefined> = {
+    ...process.env,
+    ...env,
+  };
+  if (env.HOME !== undefined && env.XDG_CONFIG_HOME === undefined) {
+    merged.XDG_CONFIG_HOME = join(env.HOME, ".config");
+  }
+  return merged;
 }
 
 /**
@@ -40,10 +93,7 @@ async function runAegisDryRun(
       ...aegisArgs,
       ...toolArgs,
     ],
-    env: {
-      ...process.env,
-      ...env,
-    },
+    env: buildChildEnv(env),
     cwd: cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -69,6 +119,28 @@ async function runAegisDryRun(
 
   return { output, stderr, exitCode };
 }
+
+// Platform-independent: this guards the test harness itself, not bwrap argv.
+_describe("child env isolation", () => {
+  test("derives XDG_CONFIG_HOME from an overridden HOME", () => {
+    const merged = buildChildEnv({ HOME: "/tmp/fake-home" });
+    expect(merged.XDG_CONFIG_HOME).toBe(join("/tmp/fake-home", ".config"));
+  });
+
+  test("an explicit XDG_CONFIG_HOME wins over the derived one", () => {
+    const merged = buildChildEnv({
+      HOME: "/tmp/fake-home",
+      XDG_CONFIG_HOME: "/tmp/explicit-config",
+    });
+    expect(merged.XDG_CONFIG_HOME).toBe("/tmp/explicit-config");
+  });
+
+  test("leaves the inherited XDG_CONFIG_HOME alone when HOME is not overridden", () => {
+    const merged = buildChildEnv({ PATH: "/nowhere" });
+    expect(merged.XDG_CONFIG_HOME).toBe(process.env.XDG_CONFIG_HOME);
+    expect(merged.HOME).toBe(process.env.HOME);
+  });
+});
 
 describe("dry-run basic functionality", () => {
   let tempDir: string;
@@ -137,6 +209,36 @@ describe("dry-run basic functionality", () => {
     expect(exitCode).toBe(0);
     expect(output).not.toBeNull();
     expect(output?.cmd).toBe("bwrap");
+  });
+
+  test("rejects every unsafe CLI -w spelling before expansion", async () => {
+    for (const path of REJECTED_WRITABLE_PATHS) {
+      const { output, stderr, exitCode } = await runAegisDryRun(
+        "cc",
+        ["--version"],
+        ["-w", path],
+        { HOME: tempHome },
+        tempProject
+      );
+      expect(exitCode).not.toBe(0);
+      expect(output).toBeNull();
+      expect(stderr).toContain(`Invalid writable path:`);
+      expect(stderr).toContain(JSON.stringify(path));
+    }
+  });
+
+  test("accepts every safe CLI -w spelling", async () => {
+    for (const path of ACCEPTED_WRITABLE_PATHS) {
+      const { output, exitCode } = await runAegisDryRun(
+        "cc",
+        ["--version"],
+        ["-w", path],
+        { HOME: tempHome },
+        tempProject
+      );
+      expect(exitCode).toBe(0);
+      expect(output?.cmd).toBe("bwrap");
+    }
   });
 });
 
@@ -553,6 +655,58 @@ describe("dry-run --hide paths", () => {
     expect(args).toContain(tempHide1);
   });
 
+  test("relative --hide resolves against cwd before bwrap emission", async () => {
+    const relativeHide = "relative-hide";
+    const absoluteHide = join(tempProject, relativeHide);
+    await mkdir(absoluteHide);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      ["--hide", relativeHide],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output?.args).toContain(absoluteHide);
+    expect(output?.args).not.toContain(relativeHide);
+  });
+
+  test("quoted tilde --hide expands using HOME", async () => {
+    const ssh = join(tempHome, ".ssh");
+    await mkdir(ssh);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      ["--hide", "~/.ssh"],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output?.args).toContain(ssh);
+    expect(output?.args).not.toContain("~/.ssh");
+  });
+
+  test("rejects home/root --hide spelling before filesystem probing", async () => {
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      ["--hide", "~/../.."],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).not.toBe(0);
+    expect(output).toBeNull();
+    expect(stderr).toContain(
+      "Invalid hide path: traversal outside $HOME is not allowed"
+    );
+    expect(stderr).not.toContain("Path does not exist");
+  });
+
   test("multiple --hide flags create multiple overlays", async () => {
     const { output, exitCode } = await runAegisDryRun(
       "cc",
@@ -663,8 +817,8 @@ describe("dry-run config integration", () => {
     const aegisConfigDir = join(tempConfig, "aegis");
     await mkdir(aegisConfigDir, { recursive: true });
     await writeFile(
-      join(aegisConfigDir, "config.json"),
-      JSON.stringify({ hideHomeAlways: true, hide: [] })
+      join(aegisConfigDir, "config.toml"),
+      `hideHomeAlways = true\nhide = []\n${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
@@ -688,6 +842,36 @@ describe("dry-run config integration", () => {
     expect(foundHomeTmpfs).toBe(true);
   });
 
+  test("homeAccess allowlist masks home, RO-binds allowRead, and ignores config.hide", async () => {
+    const readable = join(tempHome, "readable");
+    const legacyHide = join(tempHome, "legacy-hide");
+    await mkdir(readable, { recursive: true });
+    await mkdir(legacyHide, { recursive: true });
+    const aegisConfigDir = join(tempConfig, "aegis");
+    await mkdir(aegisConfigDir, { recursive: true });
+    await writeFile(
+      join(aegisConfigDir, "config.toml"),
+      `hideHomeAlways = false
+homeAccess = "allowlist"
+hide = [${JSON.stringify(legacyHide)}]
+allowRead = ["~/readable"]
+${CLAUDE_TOOL_TOML}`
+    );
+
+    const { output, exitCode } = await runAegisDryRun(
+      "cc",
+      ["--version"],
+      [],
+      { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
+      tempProject
+    );
+    expect(exitCode).toBe(0);
+    const args = output?.args ?? [];
+    expect(containsSequence(args, ["--tmpfs", tempHome])).toBe(true);
+    expect(containsSequence(args, ["--ro-bind", readable, readable])).toBe(true);
+    expect(args).not.toContain(legacyHide);
+  });
+
   test("merges config.hide with CLI --hide", async () => {
     const configHide = join(tempDir, "config-hide");
     const cliHide = join(tempDir, "cli-hide");
@@ -697,8 +881,8 @@ describe("dry-run config integration", () => {
     const aegisConfigDir = join(tempConfig, "aegis");
     await mkdir(aegisConfigDir, { recursive: true });
     await writeFile(
-      join(aegisConfigDir, "config.json"),
-      JSON.stringify({ hideHomeAlways: false, hide: [configHide] })
+      join(aegisConfigDir, "config.toml"),
+      `hideHomeAlways = false\nhide = [${JSON.stringify(configHide)}]\n${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
@@ -720,11 +904,8 @@ describe("dry-run config integration", () => {
     const aegisConfigDir = join(tempConfig, "aegis");
     await mkdir(aegisConfigDir, { recursive: true });
     await writeFile(
-      join(aegisConfigDir, "config.json"),
-      JSON.stringify({
-        hideHomeAlways: false,
-        hide: ["/this/path/does/not/exist"],
-      })
+      join(aegisConfigDir, "config.toml"),
+      `hideHomeAlways = false\nhide = ["/this/path/does/not/exist"]\n${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
@@ -779,12 +960,11 @@ describe("dry-run MUST NOT execute bwrap", () => {
         "--dry-run",
         "--version",
       ],
-      env: {
-        ...process.env,
+      env: buildChildEnv({
         HOME: tempHome,
         PATH: newPath,
         AEGIS_BWRAP_SENTINEL: sentinelPath,
-      },
+      }),
       cwd: tempProject,
       stdout: "pipe",
       stderr: "pipe",
@@ -823,12 +1003,11 @@ describe("dry-run MUST NOT execute bwrap", () => {
         "--hide-home",
         "--version",
       ],
-      env: {
-        ...process.env,
+      env: buildChildEnv({
         HOME: tempHome,
         PATH: newPath,
         AEGIS_BWRAP_SENTINEL: sentinelPath,
-      },
+      }),
       cwd: tempProject,
       // Use "ignore" since we only check exitCode and sentinel file
       // This avoids potential stream buffer deadlocks
@@ -860,12 +1039,11 @@ describe("dry-run MUST NOT execute bwrap", () => {
         tempHide,
         "--version",
       ],
-      env: {
-        ...process.env,
+      env: buildChildEnv({
         HOME: tempHome,
         PATH: newPath,
         AEGIS_BWRAP_SENTINEL: sentinelPath,
-      },
+      }),
       cwd: tempProject,
       // Use "ignore" since we only check exitCode and sentinel file
       // This avoids potential stream buffer deadlocks

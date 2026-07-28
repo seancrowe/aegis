@@ -8,6 +8,7 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import type { SandboxOptions, SandboxCommand } from "./types";
+import { makeIsPathMasked } from "./masking";
 
 /** @deprecated use SandboxOptions from ./types */
 export type BwrapOptions = SandboxOptions;
@@ -30,8 +31,17 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
   args.push("--proc", "/proc");
 
   // 2. Home directory mounts
+  // TODO: Linux diverges from macOS here: writes into a masked $HOME succeed
+  // and are silently discarded at exit, the silent-loss shape aegis otherwise
+  // avoids. Converging on macOS's fail-loudly semantics is not a one-line
+  // change: bwrap creates mountpoints inside the masked home with --dir and
+  // --ro-bind /dev/null for the tool's rwPaths, and --dir cannot create inside
+  // a read-only mount. This needs either an empty host directory with the
+  // mountpoints pre-created and --ro-bind'ed over $HOME, or the tmpfs remounted
+  // read-only after setup.
   if (opts.hideHome) {
-    // Hide-home: tmpfs over $HOME, then create mountpoints (unchanged)
+    // Hide-home: tmpfs over $HOME, then create the tool's own mountpoints
+    // inside it. The mountpoint creation is what the TODO above is about.
     args.push("--tmpfs", opts.home);
     for (const rp of opts.cliDef.rwPaths) {
       const fullPath = join(opts.home, rp.path);
@@ -41,10 +51,20 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
         args.push("--ro-bind", "/dev/null", fullPath);
       }
     }
+    // A bind source must exist or bwrap aborts before launching the tool.
+    // Keep missing config entries lenient, matching extraWritable below; unlike
+    // Seatbelt, a mount cannot describe a path that may appear later.
+    for (const p of opts.allowRead) {
+      if (existsSync(p)) {
+        args.push("--ro-bind", p, p);
+      }
+    }
   } else {
     // Non-hideHome: bind $HOME as RW, selectively protect entries as RO.
     // File rwPaths (direct children) are NOT overlaid — they stay writable
     // as part of the $HOME bind, enabling atomic writes (temp+rename).
+    // allowRead needs no mount in this branch because home is already readable;
+    // adding a RO overlay could unexpectedly revoke a separate write grant.
     args.push("--bind", opts.home, opts.home);
 
     const fileRwBasenames = new Set(
@@ -99,7 +119,7 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
     args.push("--ro-bind", ov.source, ov.target);
   }
 
-  // 5c. Project overrides (.aegis.json — highest precedence)
+  // 5c. Project overrides (.aegis.toml — highest precedence)
   for (const ov of opts.projectOverrides) {
     args.push("--ro-bind", ov.source, ov.target);
   }
@@ -115,9 +135,7 @@ export function buildBwrapArgs(opts: SandboxOptions): Result<string[], Error> {
   //     to find adjacent resources still sees the layout it was installed
   //     with. Paths outside every masked region are skipped — those are
   //     already visible through the read-only root bind.
-  const isMasked = (p: string): boolean =>
-    (opts.hideHome && p.startsWith(opts.home + "/")) ||
-    opts.hidePaths.some(h => p === h || p.startsWith(h + "/"));
+  const isMasked = makeIsPathMasked(opts);
 
   for (const entry of opts.toolChain) {
     if (!isMasked(entry.path)) continue;

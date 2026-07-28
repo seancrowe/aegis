@@ -6,7 +6,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Result } from "typescript-result";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   validateOverrideEntries,
   parseOverrides,
@@ -16,6 +16,7 @@ import {
   assertContentOverridesSupported,
   type OverrideEntry,
 } from "../../src/config/overrides";
+import { parseConfig } from "../../src/config/config";
 
 // ── validateOverrideEntries ──
 
@@ -132,46 +133,91 @@ describe("validateOverrideEntries", () => {
     Result.assertOk(result);
     expect(result.value[0]!).toEqual({ target: ".env" });
   });
+
+  test("cwdOverrides and .aegis.toml reject the identical spelling set", () => {
+    const spellings = [
+      "~",
+      "~/",
+      "~/.",
+      "~/../..",
+      "~//../../etc",
+      "/",
+      "/Users/../..",
+      "../outside",
+      "../../..",
+      "bad\u007fpath",
+      ".env",
+      "dir/../.env",
+      "~/.config/aegis/sandbox-env",
+      "/opt/aegis/sandbox-env",
+    ];
+
+    for (const spelling of spellings) {
+      const encoded = JSON.stringify(spelling);
+      const cwdResult = parseConfig(
+        `hideHomeAlways = false
+hide = []
+cwdOverrides = [{ target = ${encoded}, override = ${encoded} }]
+`,
+        "/tmp/config.toml"
+      );
+      const projectResult = parseOverrides(
+        `overrides = [{ target = ${encoded}, override = ${encoded} }]
+`,
+        "/tmp/project/.aegis.toml"
+      );
+
+      expect(cwdResult.ok, spelling).toBe(projectResult.ok);
+    }
+  });
 });
 
 // ── parseOverrides ──
 
 describe("parseOverrides", () => {
-  test("parses valid JSON array", () => {
-    const result = parseOverrides('[{"target": ".env"}]');
+  test("parses wrapper key with mixed string and table entries", () => {
+    const result = parseOverrides(
+      'overrides = ["build/", { target = ".env", override = ".env.sandbox" }]\n'
+    );
     Result.assertOk(result);
-    expect(result.value).toEqual([{ target: ".env" }]);
+    expect(result.value).toEqual([
+      { target: "build/" },
+      { target: ".env", override: ".env.sandbox" },
+    ]);
   });
 
-  test("parses empty array", () => {
-    const result = parseOverrides("[]");
+  test("accepts an explicitly empty override list", () => {
+    const result = parseOverrides("overrides = []\n");
     Result.assertOk(result);
     expect(result.value).toEqual([]);
   });
 
-  test("accepts JSON5 comments and trailing commas", () => {
-    const result = parseOverrides(`[
-      // mask the real .env
-      { "target": ".env" },
-    ]`);
+  test("preserves the bare-string shorthand", () => {
+    const result = parseOverrides('overrides = [".env"]\n');
     Result.assertOk(result);
     expect(result.value).toEqual([{ target: ".env" }]);
   });
 
-  test("rejects invalid JSON", () => {
-    const result = parseOverrides("not json");
+  test("rejects invalid TOML and names the file", () => {
+    const result = parseOverrides("bad toml{{{", "/project/.aegis.toml");
     Result.assertError(result);
-    expect(result.error.message).toContain("Invalid JSON");
+    expect(result.error.message).toContain("/project/.aegis.toml");
   });
 
-  test("rejects JSON object (not array)", () => {
-    const result = parseOverrides('{"target": ".env"}');
+  test("rejects a root array and names the file", () => {
+    const result = parseOverrides("[1, 2]", "/project/.aegis.toml");
     Result.assertError(result);
+    expect(result.error.message).toContain("/project/.aegis.toml");
   });
 
-  test("rejects JSON with invalid entry", () => {
-    const result = parseOverrides('[{"target": ""}]');
+  test("rejects a non-array overrides value and names the file", () => {
+    const result = parseOverrides(
+      'overrides = "not an array"\n',
+      "/project/.aegis.toml"
+    );
     Result.assertError(result);
+    expect(result.error.message).toContain("/project/.aegis.toml");
+    expect(result.error.message).toContain("must be an array");
   });
 });
 
@@ -188,36 +234,69 @@ describe("loadProjectOverrides", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("returns null when .aegis.json does not exist", async () => {
+  test("returns null when .aegis.toml does not exist", async () => {
     const result = await loadProjectOverrides(tempDir);
     Result.assertOk(result);
     expect(result.value).toBeNull();
   });
 
-  test("loads valid .aegis.json", async () => {
+  test("loads valid .aegis.toml", async () => {
     await writeFile(
-      join(tempDir, ".aegis.json"),
-      JSON.stringify([{ target: ".env" }])
+      join(tempDir, ".aegis.toml"),
+      'overrides = [{ target = ".env" }]\n'
     );
     const result = await loadProjectOverrides(tempDir);
     Result.assertOk(result);
     expect(result.value).toEqual([{ target: ".env" }]);
   });
 
-  test("returns error on malformed .aegis.json", async () => {
-    await writeFile(join(tempDir, ".aegis.json"), "bad json{{{");
-    const result = await loadProjectOverrides(tempDir);
-    Result.assertError(result);
-  });
-
-  test("returns error on invalid structure", async () => {
+  test("loads a BOM-prefixed .aegis.toml without dropping its rules", async () => {
     await writeFile(
-      join(tempDir, ".aegis.json"),
-      JSON.stringify({ target: ".env" }) // object, not array
+      join(tempDir, ".aegis.toml"),
+      '\uFEFFoverrides = ["build/", { target = ".env", override = ".env.sandbox" }]\n'
     );
     const result = await loadProjectOverrides(tempDir);
-    Result.assertError(result);
+    Result.assertOk(result);
+    expect(result.value).toEqual([
+      { target: "build/" },
+      { target: ".env", override: ".env.sandbox" },
+    ]);
   });
+
+  test("returns error on malformed .aegis.toml and names the file", async () => {
+    await writeFile(join(tempDir, ".aegis.toml"), "bad toml{{{");
+    const result = await loadProjectOverrides(tempDir);
+    Result.assertError(result);
+    expect(result.error.message).toContain(".aegis.toml");
+  });
+
+  test("returns error when no recognized top-level key exists", async () => {
+    await writeFile(join(tempDir, ".aegis.toml"), "");
+    const result = await loadProjectOverrides(tempDir);
+    Result.assertError(result);
+    expect(result.error.message).toContain(".aegis.toml");
+    expect(result.error.message).toContain(
+      "Overrides contain no recognized top-level keys"
+    );
+  });
+
+  test("accepts an explicitly empty override list", async () => {
+    await writeFile(join(tempDir, ".aegis.toml"), "overrides = []\n");
+    const result = await loadProjectOverrides(tempDir);
+    Result.assertOk(result);
+    expect(result.value).toEqual([]);
+  });
+});
+
+test(".aegis.toml fixture rejects a target that expands to root", async () => {
+  const fixtureDir = resolve(
+    import.meta.dir,
+    "../fixtures/overrides/root-traversal"
+  );
+  const result = await loadProjectOverrides(fixtureDir);
+  Result.assertError(result);
+  expect(result.error.message).toContain(".aegis.toml");
+  expect(result.error.message).toContain(JSON.stringify("~/../.."));
 });
 
 // ── resolvePath ──
@@ -453,27 +532,36 @@ describe("assertContentOverridesSupported", () => {
 
   test("passes on a backend that supports content overrides", () => {
     const result = assertContentOverridesSupported(supporting, [
-      { label: ".aegis.json", entries: [{ target: ".env", override: ".env.sandbox" }] },
+      {
+        label: ".aegis.toml",
+        entries: [{ target: ".env", override: ".env.sandbox" }],
+      },
     ]);
     expect(result.ok).toBe(true);
   });
 
   test("passes when only masking entries are present (no override field)", () => {
     const result = assertContentOverridesSupported(nonSupporting, [
-      { label: ".aegis.json", entries: [{ target: "build/" }, { target: "secrets/" }] },
+      {
+        label: ".aegis.toml",
+        entries: [{ target: "build/" }, { target: "secrets/" }],
+      },
     ]);
     expect(result.ok).toBe(true);
   });
 
   test("errors on a substitution entry, naming the target and source file", () => {
     const result = assertContentOverridesSupported(nonSupporting, [
-      { label: ".aegis.json", entries: [{ target: ".env", override: ".env.sandbox" }] },
+      {
+        label: ".aegis.toml",
+        entries: [{ target: ".env", override: ".env.sandbox" }],
+      },
     ]);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     const msg = result.error.message;
     expect(msg).toContain("sandbox-exec");
-    expect(msg).toContain(".aegis.json");
+    expect(msg).toContain(".aegis.toml");
     expect(msg).toContain('".env"');
     expect(msg).toContain('".env.sandbox"');
   });
@@ -481,7 +569,7 @@ describe("assertContentOverridesSupported", () => {
   test("errors only on the substitution entry, ignoring masks alongside it", () => {
     const result = assertContentOverridesSupported(nonSupporting, [
       {
-        label: ".aegis.json",
+        label: ".aegis.toml",
         entries: [
           { target: "build/" },
           { target: ".env", override: ".env.sandbox" },
@@ -497,12 +585,15 @@ describe("assertContentOverridesSupported", () => {
 
   test("reports substitution entries from multiple sources", () => {
     const result = assertContentOverridesSupported(nonSupporting, [
-      { label: "config.json cwdOverrides", entries: [{ target: "a", override: "b" }] },
-      { label: ".aegis.json", entries: [{ target: "c", override: "d" }] },
+      {
+        label: "config.toml cwdOverrides",
+        entries: [{ target: "a", override: "b" }],
+      },
+      { label: ".aegis.toml", entries: [{ target: "c", override: "d" }] },
     ]);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.message).toContain("config.json cwdOverrides");
-    expect(result.error.message).toContain(".aegis.json");
+    expect(result.error.message).toContain("config.toml cwdOverrides");
+    expect(result.error.message).toContain(".aegis.toml");
   });
 });

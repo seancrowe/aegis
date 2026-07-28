@@ -1,12 +1,16 @@
 /**
  * CWD-relative bind overrides — shared types, parser, loader, and resolver.
- * Used by both .aegis.json (per-project) and config.cwdOverrides (global).
+ * Used by both .aegis.toml (per-project) and config.cwdOverrides (global).
  */
 import { Result } from "typescript-result";
-import JSON5 from "json5";
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve, normalize } from "node:path";
+import { join, resolve } from "node:path";
+import { isTable, parseToml, stripBom } from "./toml";
+import {
+  expandUserPath,
+  validatePolicyPath,
+} from "./policyPath";
 
 export interface OverrideEntry {
   target: string;
@@ -37,6 +41,10 @@ export function validateOverrideEntries(
           new Error("Override entry: target must be a non-empty string")
         );
       }
+      const targetResult = validatePolicyPath(entry, "override target", {
+        allowRelative: true,
+      });
+      if (!targetResult.ok) return Result.error(targetResult.error);
       result.push({ target: entry });
       continue;
     }
@@ -59,6 +67,20 @@ export function validateOverrideEntries(
         new Error("Override entry: override must be a non-empty string")
       );
     }
+    const targetResult = validatePolicyPath(
+      obj.target,
+      "override target",
+      { allowRelative: true }
+    );
+    if (!targetResult.ok) return Result.error(targetResult.error);
+    if (typeof obj.override === "string") {
+      const overrideResult = validatePolicyPath(
+        obj.override,
+        "override source",
+        { allowRelative: true }
+      );
+      if (!overrideResult.ok) return Result.error(overrideResult.error);
+    }
     const e: OverrideEntry = { target: obj.target };
     if (obj.override !== undefined) e.override = obj.override as string;
     result.push(e);
@@ -66,31 +88,62 @@ export function validateOverrideEntries(
   return Result.ok(result);
 }
 
-/**
- * Parse a JSON string into validated OverrideEntry[].
- */
-export function parseOverrides(json: string): Result<OverrideEntry[], Error> {
-  let raw: unknown;
-  try {
-    raw = JSON5.parse(json);
-  } catch {
-    return Result.error(new Error("Invalid JSON5 in overrides"));
+function overridesError(
+  configPath: string,
+  message: string
+): Result<never, Error> {
+  return Result.error(new Error(`${configPath}: ${message}`));
+}
+
+/** Parse and validate a TOML project-overrides document. */
+export function parseOverrides(
+  toml: string,
+  configPath: string = ".aegis.toml"
+): Result<OverrideEntry[], Error> {
+  // Bun silently treats a BOM-prefixed document as empty, which would drop
+  // every masking rule while making the file appear to have loaded normally.
+  const content = stripBom(toml);
+
+  const parsed = parseToml(content, configPath);
+  if (!parsed.ok) return Result.error(parsed.error);
+  const raw = parsed.value;
+
+  if (!isTable(raw)) {
+    return overridesError(configPath, "Overrides must be a TOML document");
   }
-  return validateOverrideEntries(raw);
+  const obj = raw as Record<string, unknown>;
+
+  if (Object.keys(obj).length === 0) {
+    return overridesError(
+      configPath,
+      "Overrides contain no recognized top-level keys"
+    );
+  }
+  for (const key of Object.keys(obj)) {
+    if (key !== "overrides") {
+      return overridesError(configPath, `Unknown top-level key "${key}"`);
+    }
+  }
+
+  const result = validateOverrideEntries(obj.overrides);
+  if (!result.ok) {
+    return overridesError(configPath, result.error.message);
+  }
+  return result;
 }
 
 /**
- * Load project overrides from <cwd>/.aegis.json.
+ * Load project overrides from <cwd>/.aegis.toml.
  * Returns null if the file does not exist.
  */
 export async function loadProjectOverrides(
   cwd: string
 ): Promise<Result<OverrideEntry[] | null, Error>> {
-  const filePath = join(cwd, ".aegis.json");
+  const filePath = join(cwd, ".aegis.toml");
   if (!existsSync(filePath)) return Result.ok(null);
   try {
     const content = await readFile(filePath, "utf-8");
-    return parseOverrides(content);
+    return parseOverrides(content, filePath);
   } catch (err) {
     return Result.error(
       err instanceof Error ? err : new Error(String(err))
@@ -136,7 +189,7 @@ export function assertContentOverridesSupported(
         `Unsupported entries:\n${blocks}\n\n` +
         `Fix one of:\n` +
         `  - Remove the "override" field to MASK the path instead (it becomes inaccessible).\n` +
-        `  - Drop these entries from .aegis.json / config.json on macOS.\n` +
+        `  - Drop these entries from .aegis.toml / config.toml on macOS.\n` +
         `  - Run on Linux (bwrap), where bind-mount substitution is supported.`
     )
   );
@@ -146,9 +199,9 @@ export function assertContentOverridesSupported(
  * Resolve a raw path (~/..., relative, or absolute) to an absolute path.
  */
 export function resolvePath(raw: string, cwd: string, home: string): string {
-  if (raw === "~") return home;
-  if (raw.startsWith("~/"))
-    return normalize(join(home, raw.slice(2)));
+  if (raw === "~" || raw.startsWith("~/")) {
+    return expandUserPath(raw, home);
+  }
   return resolve(cwd, raw);
 }
 

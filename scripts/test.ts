@@ -12,15 +12,17 @@
  * Layers:
  *   local       Run L1/L2 tests locally (default if no layers specified)
  *   layer3      Run L3 bwrap semantic tests in Docker
+ *   layer3m     Run L3m sandbox-exec semantic tests natively on macOS
  *   layer4      Run L4 e2e tests in Docker
  *   docker      Run L3 + L4 in Docker
- *   all         Run all layers (local + docker)
+ *   all         Run all layers (local + L3m + docker)
  *
  * Examples:
  *   bun run scripts/test.ts              # Run L1/L2 locally
  *   bun run scripts/test.ts all          # Run all tests
  *   bun run scripts/test.ts --logs all   # Run all with detailed output
  *   bun run scripts/test.ts layer3       # Run only L3 in Docker
+ *   bun run scripts/test.ts layer3m      # Run only L3m natively
  */
 
 import { $ } from "bun";
@@ -43,6 +45,7 @@ function log(color: keyof typeof colors, message: string) {
 interface TestResult {
   layer: string;
   success: boolean;
+  skipped?: boolean;
   output: string;
   duration: number;
 }
@@ -84,15 +87,17 @@ ${colors.yellow}Options:${colors.reset}
 ${colors.yellow}Layers:${colors.reset}
   local       Run L1/L2 tests locally (default)
   layer3      Run L3 bwrap semantic tests in Docker
+  layer3m     Run L3m sandbox-exec semantic tests natively on macOS
   layer4      Run L4 e2e tests in Docker
   docker      Run L3 + L4 in Docker
-  all         Run all layers (local + docker)
+  all         Run all layers (local + L3m + docker)
 
 ${colors.yellow}Examples:${colors.reset}
   bun run scripts/test.ts              # Run L1/L2 locally
   bun run scripts/test.ts all          # Run all tests
   bun run scripts/test.ts --logs all   # Run all with detailed output
   bun run scripts/test.ts layer3       # Run only L3 in Docker
+  bun run scripts/test.ts layer3m      # Run only L3m natively
 `);
 }
 
@@ -240,20 +245,63 @@ async function runDockerTests(
   }
 }
 
+async function runMacSemanticTests(): Promise<TestResult> {
+  const start = Date.now();
+  const name = "Layer 3m (sandbox-exec semantic)";
+  log("blue", `\n=== Running ${name} natively ===\n`);
+
+  try {
+    const result =
+      await $`bun test tests/integration/seatbeltSemantic.test.ts`.quiet();
+    const output = result.text() + result.stderr.toString();
+
+    // A guarded skip is valid on nested/non-macOS hosts, but its reason and
+    // counts must remain visible so nobody mistakes it for kernel coverage.
+    console.log(output.trim());
+
+    return {
+      layer: name,
+      success: true,
+      skipped: output.includes("SKIP Layer 3m:"),
+      output,
+      duration: Date.now() - start,
+    };
+  } catch (error: unknown) {
+    const err = error as { stdout?: Buffer; stderr?: Buffer };
+    const output =
+      (err.stdout?.toString() ?? "") +
+        (err.stderr?.toString() ?? "") || String(error);
+    console.log(output);
+    log("red", `${name} tests failed`);
+    return {
+      layer: name,
+      success: false,
+      output,
+      duration: Date.now() - start,
+    };
+  }
+}
+
 function printSummary(results: TestResult[], showLogs: boolean) {
   console.log("\n" + "=".repeat(60));
   log("bold", "Test Summary");
   console.log("=".repeat(60) + "\n");
 
   let allPassed = true;
+  let anySkipped = false;
 
   for (const result of results) {
-    const status = result.success
-      ? `${colors.green}PASS${colors.reset}`
-      : `${colors.red}FAIL${colors.reset}`;
+    const status = result.skipped
+      ? `${colors.yellow}SKIP${colors.reset}`
+      : result.success
+        ? `${colors.green}PASS${colors.reset}`
+        : `${colors.red}FAIL${colors.reset}`;
     const duration = (result.duration / 1000).toFixed(1);
     console.log(`  ${status}  ${result.layer} (${duration}s)`);
 
+    if (result.skipped) {
+      anySkipped = true;
+    }
     if (!result.success) {
       allPassed = false;
 
@@ -277,7 +325,12 @@ function printSummary(results: TestResult[], showLogs: boolean) {
   console.log("");
 
   if (allPassed) {
-    log("green", "All tests passed!");
+    log(
+      anySkipped ? "yellow" : "green",
+      anySkipped
+        ? "All executed tests passed; at least one layer was skipped."
+        : "All tests passed!"
+    );
   } else {
     log("red", "Some tests failed. Run with --logs for details.");
   }
@@ -300,6 +353,7 @@ async function main() {
       case "all":
         expandedLayers.add("local");
         expandedLayers.add("layer3");
+        expandedLayers.add("layer3m");
         expandedLayers.add("layer4");
         break;
       case "docker":
@@ -321,6 +375,10 @@ async function main() {
   // Run Docker tests if requested
   if (expandedLayers.has("layer3")) {
     results.push(await runDockerTests("layer3", args.logs));
+  }
+
+  if (expandedLayers.has("layer3m")) {
+    results.push(await runMacSemanticTests());
   }
 
   if (expandedLayers.has("layer4")) {

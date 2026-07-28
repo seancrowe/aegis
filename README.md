@@ -23,17 +23,18 @@ aegis is a **filesystem confinement** tool. Being explicit about what that does 
 
 **What it protects against**
 
-- An agent reading credentials, keys, or unrelated projects outside its working directory
-- An agent modifying or deleting files outside cwd and its own config
+- An agent reading paths you explicitly hide; in `homeAccess = "allowlist"` mode (or with `--hide-home`), `$HOME` is hidden except for explicit carve-outs such as cwd, tool config, `allowRead`, and writable paths
+- An agent modifying or deleting files outside cwd, its own config, and configured writable paths
 - Accidental `sudo`/privilege escalation from inside the sandbox (exec of `sudo`, `su`, `login`, `doas`, `pkexec` is denied)
 
 **What it does *not* protect against**
 
 - **Network access.** The sandbox does **not** isolate the network. A sandboxed tool has the same connectivity your shell does, and can reach any host it wants. Anything the agent can read, it can send somewhere. This is deliberate — these tools are useless without network access to their own APIs — but it means aegis limits *what data is reachable*, not *where reachable data can go*.
-- **Anything the agent can legitimately write.** Code in your cwd is read-write by design; an agent can still write a malicious script there, and `extraWritable` paths widen that surface.
+- **Anything the agent can legitimately write.** Code in your cwd and the selected tool's config paths are read-write by design; an agent can still write a malicious script there. Global and per-tool `extraWritable` settings widen that surface.
 - **Supply-chain execution.** Commands the agent runs (package installs, build scripts) execute with the same sandbox permissions the agent has.
 - **Resource exhaustion.** No CPU, memory, or disk quotas are applied.
-- On macOS specifically, `/tmp` is shared with the host and there is no process isolation — see [macOS notes](#macos-notes).
+- **Tool config paths, even under a hidden `$HOME`.** A tool's writable paths are re-allowed after the home deny and carry read as well as write. Concretely: on macOS, `--hide-home` does **not** hide `~/Library/Keychains` from `cc` — the login keychain stays readable and writable, because the CLI must read and rotate the OAuth token it stores there. Hiding it would break token refresh, so this is a deliberate trade, not an oversight.
+- On macOS specifically, `/tmp` and the per-user `$TMPDIR` are writable host directories that persist across runs, and there is no process isolation — see [macOS notes](#macos-notes).
 
 If you need network egress control or full process isolation, a VM or a container with an explicit network policy is the right tool; aegis deliberately trades that isolation for near-zero startup cost and direct access to your real working directory.
 
@@ -64,8 +65,9 @@ Linux and macOS are both first-class, supported backends. aegis picks one automa
 The macOS backend enforces the same model (read-only root, writable cwd + tool config, hidden credential dirs) as a Seatbelt (SBPL) policy rather than a mount namespace. Because it's a policy engine, not a virtual filesystem, a few behaviors differ from the Linux backend:
 
 - **File-content overrides are not supported.** A masking override (`"secrets/"`) works — the path is denied. A substitution override (`{ "target": ".env", "override": ".env.sandbox" }`) cannot be honored, because Seatbelt can deny or allow a path but not swap its contents. aegis detects these and exits with a clear error rather than silently ignoring them.
-- **`--hide-home` denies reads under `$HOME`** (re-allowing tool config) instead of mounting an empty tmpfs. Hidden paths fail with "operation not permitted" rather than appearing empty — equivalent protection, slightly different semantics.
-- **`/tmp` is not isolated.** Linux gets a private tmpfs `/tmp`; macOS shares the real `/tmp` (still writable).
+- **`--hide-home` denies reads and writes under `$HOME`** (re-allowing tool config) instead of mounting an empty tmpfs. On macOS, writes to the masked home fail immediately; on Linux, they currently succeed and are discarded when the sandbox exits.
+- **Temporary storage is writable and persistent.** Linux gets a private tmpfs `/tmp`; macOS shares the host's real `/tmp` and per-user `$TMPDIR`. Both remain writable under `--hide-home`, and `$TMPDIR` outlives the run, so masking `$HOME` does not prevent the tool from persisting data in host temp storage.
+- **Seatbelt matches kernel-resolved paths.** For `hide` and override masks, aegis denies both the configured spelling and its realpath, so a symlink such as `~/.aws` pointing into a dotfiles repo remains hidden. Allow rules (`rwDirs`/`rwFiles`, `extraWritable`, and `allowRead`) are deliberately not canonicalized: a missed allow fails loudly with a permission error, while a missed deny could fail silently. If a tool config directory is symlinked, configure its real path instead (for `rwDirs`, use the canonical home-relative path).
 - **No PID/IPC isolation.** macOS provides filesystem confinement only; the sandboxed tool shares the host process space.
 - **`sandbox-exec` is formally deprecated by Apple.** The CLI has printed a deprecation warning for years, but it remains present in current macOS and is still the mechanism Apple's own tooling relies on. aegis inherits the child's stderr rather than filtering it, so you will see that deprecation warning on every run — it's from the OS, not from aegis. No private API is used. If Apple ever removes the command, the macOS backend would need to move to a different mechanism.
 
@@ -93,23 +95,35 @@ bun install
 aegis <tool> [flags] [tool-args...]
 ```
 
-### Supported Tools
+### Tool catalog
 
-| Tool | Name | YOLO flag (auto-injected) |
-|------|------|--------------------------|
-| Claude Code | `claude` | `--dangerously-skip-permissions` |
+| Tool | Default config key | YOLO flag (auto-injected) |
+|------|--------------------|--------------------------|
+| Claude Code | `cc` | `--dangerously-skip-permissions` |
 | Codex | `codex` | `--dangerously-bypass-approvals-and-sandbox` |
 | Gemini CLI | `gemini` | `--yolo` |
 | Crush | `crush` | `--yolo` |
 | Auggie | `auggie` | *(none)* |
 | OpenCode | `opencode` | *(none)* |
 
+These are scaffolding recipes, not built-in tools. Only `[tools.<name>]` tables
+present in your config become commands.
+
+### Setup commands
+
+| Command | Description |
+|---------|-------------|
+| `aegis tools list` | Show catalog recipes and whether each default key is configured |
+| `aegis tools add <name>...` | Append one or more catalog recipes, such as `aegis tools add claude` |
+| `aegis tools schema` | Print the TOML config schema and a worked example |
+| `aegis init [--all] [--yes]` | Detect installed agents and offer to add them; `--all` includes agents not found on `PATH`, and `--yes` accepts without prompting |
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Print the sandbox command as JSON without executing it (bwrap argv on Linux, `sandbox-exec -p <profile>` on macOS) |
-| `--hide-home` | Replace `$HOME` with an empty tmpfs, preserving only the tool's config paths |
+| `--hide-home` | Mask `$HOME`, preserving only the tool's config paths (backend behavior differs; see macOS notes) |
 | `--hide <dir>` | Hide a specific directory inside the sandbox (repeatable, supports `--hide=<dir>`) |
 | `-w, --writable <dir>` | Allow write access to a directory beyond cwd and tool config (repeatable, supports `--writable=<dir>`). CLI counterpart of the `extraWritable` config key — useful for build/compiler caches a tool writes outside the project |
 
@@ -119,10 +133,10 @@ Aegis flags are consumed by aegis and **not** forwarded to the wrapped tool. Eve
 
 ```bash
 # Run Claude in a sandbox
-aegis claude "explain this codebase"
+aegis cc "explain this codebase"
 
 # Hide your home directory (SSH keys, AWS creds, etc.)
-aegis claude --hide-home "write a test for main.ts"
+aegis cc --hide-home "write a test for main.ts"
 
 # Hide specific directories
 aegis gemini --hide ~/.ssh --hide ~/.aws "refactor the auth module"
@@ -134,43 +148,81 @@ aegis codex -w ~/.cargo/registry --writable ~/Library/Caches/go-build "build it"
 aegis codex --dry-run --hide-home
 
 # Tool flags are passed through as-is
-aegis claude --hide-home --version
+aegis cc --hide-home --version
 ```
 
 ## Configuration
 
-Config is stored at `$XDG_CONFIG_HOME/aegis/config.json` (defaults to `~/.config/aegis/config.json`). The file is parsed as **[JSON5](https://json5.org)**, so `//` and `/* */` comments and trailing commas are allowed — plain JSON still works unchanged. The same goes for per-project `.aegis.json` override files. On first run aegis writes a commented template you can edit in place.
+Config is stored at `$XDG_CONFIG_HOME/aegis/config.toml` (defaults to `~/.config/aegis/config.toml`) and parsed as TOML. Per-project overrides are stored in `.aegis.toml` under the `overrides` key. On first run aegis writes a commented template you can edit in place.
 
-The generated template hides the common credential directories out of the box:
+There are **no built-in tools**. A fresh install gets six configured tools only because the generated template contains six `[tools.<name>]` tables. Deleting a table removes that command; no `tools` table or an empty `[tools]` table means no tools. Use `aegis init` or `aegis tools add <name>` to populate an empty tool set.
 
-```json5
-{
-  // Replace $HOME with an empty view on every run (same as --hide-home).
-  "hideHomeAlways": false,
+This illustrative config shows the main global settings and one tool with
+optional per-tool policy:
 
-  // Directories made invisible inside the sandbox. Supports ~.
-  "hide": [
-    "~/.ssh",
-    "~/.gnupg",
-    "~/.aws",
-    "~/.config/gcloud",
-    "~/.azure",
-    "~/.kube",
-  ],
+```toml
+# Replace $HOME with an empty view on every run (same as --hide-home).
+hideHomeAlways = false
 
-  // Extra dirs to keep writable beyond cwd + tool config. Supports ~.
-  // Empty by default — see the toolchain cache list below.
-  "extraWritable": [],
-}
+# Preserve the historical readable-home-minus-hide model.
+homeAccess = "blocklist"
+
+# Directories made invisible inside the sandbox. Supports ~.
+hide = [
+  "~/.ssh",
+  "~/.gnupg",
+  "~/.aws",
+  "~/.config/gcloud",
+  "~/.azure",
+  "~/.kube",
+]
+
+# Extra paths to keep readable when home is masked. Supports ~.
+allowRead = []
+
+# Extra dirs to keep writable beyond cwd + tool config. Supports ~.
+# Empty by default — see the toolchain cache list below.
+extraWritable = []
+
+[tools.cc]
+name = "claude code"
+cliCmd = "claude"
+yoloArg = "--dangerously-skip-permissions"
+rwDirs = [".claude"]
+rwFiles = [".claude.json"]
+hide = ["~/.kube"]
+extraWritable = ["~/.cache/claude"]
+hideHomeAlways = false
 ```
 
-> **This is a blocklist, not an allowlist.** Everything *not* listed in `hide` stays readable, because the sandbox mounts the whole filesystem read-only and then subtracts from it. The defaults cover the credential directories that exist today; a tool that starts writing secrets somewhere new is readable until you add it here. If that trade-off doesn't suit you, `--hide-home` / `hideHomeAlways` inverts it — `$HOME` is masked wholesale and only the tool's own config is re-exposed.
+`homeAccess = "blocklist"` preserves the historical model: everything *not* listed in `hide` stays readable, because the sandbox mounts the whole filesystem read-only and then subtracts from it. The defaults cover the credential directories that exist today; a tool that starts writing secrets somewhere new is readable until you add it.
+
+`homeAccess = "allowlist"` masks `$HOME` wholesale and re-exposes explicit carve-outs: cwd, the tool's own config, `allowRead`, and configured writable paths. The `hide` list still applies: entries under `$HOME` are redundant there (the mask already covers them), but entries *outside* `$HOME` are not covered by the mask, so they stay enforced in both modes — switching to allowlist never unhides something you asked to hide. Per-run `--hide` rules and overrides still take precedence over `allowRead`. `--hide-home` / `hideHomeAlways` provides the same masking in blocklist mode, and `allowRead` applies there too. `allowRead` is read-only and never grants write access.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `hideHomeAlways` | `boolean` | When `true`, always apply `--hide-home` behavior |
+| `homeAccess` | `"blocklist"` or `"allowlist"` | Home read policy. Defaults to `"blocklist"` for upgrade compatibility; `"allowlist"` masks `$HOME` except for explicit cwd, tool-config, readable, and writable carve-outs |
 | `hide` | `string[]` | Directories to always hide (merged with CLI `--hide` flags). Pre-populated with `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`, `~/.azure`, `~/.kube` |
+| `allowRead` | `string[]` | Extra paths to re-expose read-only when `$HOME` is masked. Supports `~`; explicit `--hide` and overrides win |
 | `extraWritable` | `string[]` | Extra directories to keep writable beyond cwd + tool config. Supports `~`. Opt-in escape hatch for tools that write outside the project — build/compiler caches such as `~/Library/Caches`, `~/Library/Developer`, `~/.cargo`, `~/.npm`, `~/go/pkg`. **Security note:** these often live under `$HOME` and may hold credentials, so nothing here is writable unless you add it. Empty by default. |
+| `cwdOverrides` | inline table array | Optional global cwd-relative masks or substitutions, using `{ target = "path", override = "replacement" }`; `override` may be omitted to mask the target |
+| `[tools.<name>]` | table | Defines one command; table order is preserved in help output |
+| `[tools.<name>].name` | `string` | Human-readable tool name |
+| `[tools.<name>].cliCmd` | `string` | Executable name or path |
+| `[tools.<name>].yoloArg` | `string` | Optional argument automatically injected into the tool invocation |
+| `[tools.<name>].rwDirs` | `string[]` | Optional directories, relative to `$HOME`, that remain writable |
+| `[tools.<name>].rwFiles` | `string[]` | Optional files, relative to `$HOME`, that remain writable |
+| `[tools.<name>].hide` | `string[]` | Optional paths hidden for this tool. Supports `~`; adds to and never replaces the global `hide` list |
+| `[tools.<name>].extraWritable` | `string[]` | Optional paths writable for this tool. Supports `~`; adds to and never replaces the global `extraWritable` list |
+| `[tools.<name>].hideHomeAlways` | `boolean` | When `true`, masks `$HOME` for this tool. OR'd with the global setting, so `false` cannot undo a global `true` |
+
+Per-tool sandbox lists always **add to** the global lists; they never replace
+them. This matters for security: adding a tool-specific path cannot silently
+remove a global hide. Per-tool `hide` and `extraWritable` still apply in
+allowlist mode; `hide` can cover paths outside `$HOME`, while `extraWritable`
+creates an explicit writable carve-out. Per-tool `hideHomeAlways` only changes
+blocklist mode because allowlist mode already masks `$HOME`.
 
 > **When do you need `extraWritable`?** If a sandboxed tool fails with "operation not permitted" while writing *outside* your project (a compiler populating its cache, a package manager, etc.), add that directory here. Writes to cwd, the tool's own config, `/tmp`/`$TMPDIR`, and the standard device nodes (`/dev/null`, `/dev/urandom`, ptys, …) already work without configuration.
 
@@ -180,48 +232,46 @@ Build toolchains write their caches outside the project. Copy the lines for the 
 
 > **Security:** `extraWritable` lives under `$HOME`. Some of these dirs hold credentials, not just cache (flagged ⚠ below). Prefer the narrowest subpath that fixes your write failure — e.g. `~/.cargo/registry` instead of all of `~/.cargo` — and widen only if a write still fails.
 
-Since `config.json` is JSON5, you can paste this block — comments and trailing commas included — straight into the file.
+You can paste this TOML assignment straight into `config.toml`:
 
-```json5
-{
-  "extraWritable": [
-    // General / Apple
-    "~/Library/Caches",                          // OS-wide cache (broad; prefer subdirs below)
-    "~/Library/Developer/Xcode/DerivedData",     // Xcode / xcodebuild build products
-    "~/Library/Developer/CoreSimulator",         // iOS Simulator
-    "~/Library/Caches/org.swift.swiftpm",        // Swift Package Manager cache
-    "~/.swiftpm",                                 // SwiftPM config/cache
+```toml
+extraWritable = [
+  # General / Apple
+  "~/Library/Caches",                      # OS-wide cache (broad; prefer subdirs below)
+  "~/Library/Developer/Xcode/DerivedData", # Xcode / xcodebuild build products
+  "~/Library/Developer/CoreSimulator",     # iOS Simulator
+  "~/Library/Caches/org.swift.swiftpm",    # Swift Package Manager cache
+  "~/.swiftpm",                            # SwiftPM config/cache
 
-    // Node / JS
-    "~/.npm",                                     // npm cache
-    "~/.bun/install/cache",                       // Bun
-    "~/Library/pnpm", "~/.local/share/pnpm",      // pnpm store
-    "~/.cache/node/corepack",                     // Corepack
-    "~/Library/Caches/Yarn",                      // Yarn 1
+  # Node / JS
+  "~/.npm",                                # npm cache
+  "~/.bun/install/cache",                  # Bun
+  "~/Library/pnpm", "~/.local/share/pnpm", # pnpm store
+  "~/.cache/node/corepack",                # Corepack
+  "~/Library/Caches/Yarn",                 # Yarn 1
 
-    // Rust
-    "~/.cargo/registry",                          // Cargo registry + build cache
-    "~/.rustup",                                  // toolchains
-    // "~/.cargo",                                // ⚠ whole dir also holds credentials.toml
+  # Rust
+  "~/.cargo/registry",                     # Cargo registry + build cache
+  "~/.rustup",                             # toolchains
+  # "~/.cargo",                            # ⚠ whole dir also holds credentials.toml
 
-    // Go
-    "~/go/pkg/mod",                               // module cache
-    "~/Library/Caches/go-build",                  // build cache
+  # Go
+  "~/go/pkg/mod",                          # module cache
+  "~/Library/Caches/go-build",             # build cache
 
-    // Python
-    "~/Library/Caches/pip",                       // pip
-    "~/.cache/uv",                                // uv (also ~/Library/Caches/uv)
-    "~/Library/Caches/pypoetry",                  // Poetry
+  # Python
+  "~/Library/Caches/pip",                  # pip
+  "~/.cache/uv",                           # uv (also ~/Library/Caches/uv)
+  "~/Library/Caches/pypoetry",             # Poetry
 
-    // Java / Kotlin
-    "~/.m2/repository",                           // Maven (⚠ ~/.m2/settings.xml holds repo passwords)
-    "~/.gradle/caches",                           // Gradle (⚠ ~/.gradle/gradle.properties holds signing keys)
+  # Java / Kotlin
+  "~/.m2/repository",                      # Maven (⚠ ~/.m2/settings.xml holds repo passwords)
+  "~/.gradle/caches",                      # Gradle (⚠ ~/.gradle/gradle.properties holds signing keys)
 
-    // C/C++ / Bazel
-    "~/.ccache",                                  // ccache
-    "~/.cache/bazel"                              // Bazel
-  ]
-}
+  # C/C++ / Bazel
+  "~/.ccache",                             # ccache
+  "~/.cache/bazel",                        # Bazel
+]
 ```
 
 CLI flags are merged with config at runtime but **never persisted** back to config.
@@ -232,17 +282,22 @@ aegis selects a backend by platform (`bwrap` on Linux, `sandbox-exec` on macOS) 
 
 ### Linux (bubblewrap)
 
-aegis builds a bubblewrap command with these mount layers (in order):
+aegis builds a bubblewrap command with these arguments and mount layers (in
+emission order):
 
-1. **Read-only root** — `--ro-bind / /` makes the entire filesystem visible but read-only
-2. **Device and proc** — `--dev /dev` and `--proc /proc` for basic system functionality
-3. **Tmpfs for /tmp** — isolated temp directory
-4. **Read-write cwd** — `--bind $CWD $CWD` so the tool can edit your project
-5. **Read-write tool config** — tool-specific paths like `~/.claude`, `~/.config/opencode`
-6. **Read-write extras** — (if `extraWritable`) `--bind` for each existing configured directory
-7. **Hide-home overlay** — (if `--hide-home`) replaces `$HOME` with tmpfs, then re-binds tool config paths on top
-8. **Hide overlays** — (if `--hide`) makes specified directories appear empty
-9. **Process isolation** — `--die-with-parent` ensures the sandbox dies with aegis
+1. **Process isolation** — `--die-with-parent` plus PID, IPC, and UTS namespace isolation
+2. **Read-only root, device, and proc** — `--ro-bind / /`, `--dev /dev`, and `--proc /proc`
+3. **Home setup** — with hide-home, `--tmpfs $HOME` is emitted first, tool-config mountpoints are created, and each existing `allowRead` path is rebound read-only; otherwise `$HOME` is bound read-write and its entries are overlaid read-only except direct-child writable files
+4. **Tmpfs for /tmp** — `--tmpfs /tmp` creates the isolated temp directory
+5. **Read-write cwd** — `--bind $CWD $CWD`
+6. **Read-write tool config** — tool-specific paths like `~/.claude` and `~/.config/opencode` are bound on top of the home setup
+7. **Read-write extras** — each existing `extraWritable` path is bound read-write
+8. **Working directory** — `--chdir $CWD`
+9. **Hide overlays** — each `hide`/`--hide` path is overlaid with the empty directory
+10. **Config overrides** — each resolved global `cwdOverrides` source is overlaid on its target
+11. **Project overrides** — resolved `.aegis.toml` sources are overlaid on their targets after global overrides
+12. **Tool binary carve-out** — a tool installed under any masked region is restored; symlink hops are recreated so a tool inspecting its own realpath still sees its original install layout
+13. **Tool execution** — `--` ends bubblewrap options, followed by the resolved tool path and its arguments
 
 (`/dev` is provided whole via `--dev /dev`, so device nodes like `/dev/null` are writable as usual on Linux.)
 
@@ -255,11 +310,14 @@ aegis emits a Seatbelt (SBPL) profile expressing the same intent as allow/deny r
 1. **Read-only root** — `(allow default)` then `(deny file-write*)`: everything readable, nothing writable
 2. **Privilege-escalation guard** — denies exec of `sudo`/`su`/`login`/`doas`/`pkexec`
 3. **Device nodes** — re-allows writes to the standard scratch devices (`/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/tty`, `/dev/fd/*`, ptys, …) that the global deny would otherwise block. Block devices (raw disks) are not included.
-4. **Read-write cwd + tool config** — `(allow file-read* file-write* (subpath …))` for the cwd and paths like `~/.claude`
-5. **Read-write extras** — (if `extraWritable`) an allow rule per configured directory (matched by prefix, so it works even before the dir exists)
-6. **Hidden credential dirs** — `(deny file-read* file-write* (subpath …))` for `--hide` paths
-7. **Hide-home** — (if `--hide-home`) `(deny file-read* (subpath $HOME))`, with tool config re-allowed afterward
-8. **Tool binary carve-out** — keeps the harness binary readable/executable even under a denied subtree
+4. **Hide-home deny** — (if hide-home is active) denies reads and writes under `$HOME`
+5. **Read-only carve-outs** — `allowRead` paths are re-allowed for reads after the broad home deny
+6. **Read-write cwd + tool config** — allows reads and writes for the cwd and paths like `~/.claude`
+7. **Read-write extras** — each `extraWritable` path gets a read/write allow rule (matched by prefix, so it works even before the directory exists)
+8. **Writable temp paths** — allows writes to `/tmp`, its canonical path, and `$TMPDIR`
+9. **Hide-path denies** — denies reads and writes for config, per-tool, and CLI `--hide` paths
+10. **Override masks** — denies reads and writes for resolved global `cwdOverrides` and then project `.aegis.toml` mask targets
+11. **Tool binary carve-out** — re-allows the resolved tool path and any symlink-chain paths needed to execute a tool installed under a denied subtree
 
 The profile is passed inline via `sandbox-exec -p`, so `--dry-run` shows it verbatim. See the [macOS notes](#macos-notes) for behavioral differences.
 
@@ -271,7 +329,7 @@ src/
 ├── types.ts               # Shared types
 ├── config/
 │   ├── config.ts          # Config loading, validation, tool specs, XDG paths
-│   └── overrides.ts       # Per-project .aegis.json overrides
+│   └── overrides.ts       # Per-project .aegis.toml overrides
 ├── fs/paths.ts            # Path resolution and validation
 ├── os/osRelease.ts        # Distro detection and install hints
 ├── sandbox/

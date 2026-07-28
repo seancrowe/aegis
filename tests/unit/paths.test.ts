@@ -231,16 +231,33 @@ describe("resolveAndValidateHidePath", () => {
   });
 
   test("resolves complex relative path", async () => {
-    const parentDir = join(tempDir, "parent");
-    const childDir = join(parentDir, "child");
     const siblingDir = join(tempDir, "sibling");
-    await mkdir(childDir, { recursive: true });
+    const nestedDir = join(tempDir, "nested");
+    await mkdir(nestedDir);
     await mkdir(siblingDir);
 
-    // From child, go up and into sibling
-    const result = resolveAndValidateHidePath("../../sibling", childDir);
+    const result = resolveAndValidateHidePath("nested/../sibling", tempDir);
     Result.assertOk(result);
     expect(result.value).toBe(siblingDir);
+  });
+
+  test("rejects control characters before probing an existing directory", async () => {
+    const dir = await mkdtemp(join(tempDir, "line\nbreak-"));
+    expect(dir).toContain("\n");
+
+    const result = resolveAndValidateHidePath(dir, tempDir);
+    Result.assertError(result);
+    expect(result.error.message).toContain("control characters");
+    expect(result.error.message).not.toContain("Path does not exist");
+  });
+
+  test("rejects raw home traversal before resolving it", () => {
+    const result = resolveAndValidateHidePath("~/../..", tempDir);
+    Result.assertError(result);
+    expect(result.error.message).toContain(
+      "traversal outside $HOME is not allowed"
+    );
+    expect(result.error.message).not.toContain("Path does not exist");
   });
 
   test("error message is helpful for invalid path", async () => {

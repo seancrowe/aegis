@@ -8,94 +8,19 @@
  * These tests must run inside Docker for a predictable filesystem.
  * Use: bun run scripts/test.ts layer3
  */
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { spawn } from "bun";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { requireDocker } from "../utils/dockerGuard";
+import {
+  parseArgs,
+  parseLsOutput,
+  parseSecretCredentialExists,
+} from "../utils/semanticOutput";
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
 const FIXTURES_BIN_TOOLS = resolve(__dirname, "../fixtures/bin-tools");
-
-// -----------------------------------------------------------------------------
-// Output Parsing Helpers
-// -----------------------------------------------------------------------------
-
-interface LsSection {
-  label: string;
-  entries: string[];
-  error?: string;
-}
-
-/**
- * Parse ls output sections from fake CLI output.
- * Sections are delimited by "=== LS:LABEL ===" headers.
- */
-function parseLsOutput(stdout: string): Map<string, LsSection> {
-  const sections = new Map<string, LsSection>();
-  const lines = stdout.split("\n");
-
-  let currentSection: LsSection | null = null;
-
-  for (const line of lines) {
-    const sectionMatch = line.match(/^=== LS:(.+) ===$/);
-    if (sectionMatch) {
-      if (currentSection) {
-        sections.set(currentSection.label, currentSection);
-      }
-      currentSection = { label: sectionMatch[1]!, entries: [] };
-      continue;
-    }
-
-    if (currentSection) {
-      if (line.startsWith("ERROR:")) {
-        currentSection.error = line;
-      } else if (line.trim() && !line.startsWith("===")) {
-        currentSection.entries.push(line.trim());
-      }
-    }
-  }
-
-  if (currentSection) {
-    sections.set(currentSection.label, currentSection);
-  }
-
-  return sections;
-}
-
-/**
- * Parse arguments section from fake CLI output.
- */
-function parseArgs(stdout: string): string[] {
-  const args: string[] = [];
-  const lines = stdout.split("\n");
-  let inArgsSection = false;
-
-  for (const line of lines) {
-    if (line === "=== ARGS ===") {
-      inArgsSection = true;
-      continue;
-    }
-    if (line.startsWith("=== ") && inArgsSection) {
-      break;
-    }
-    if (inArgsSection) {
-      const argMatch = line.match(/^arg: (.+)$/);
-      if (argMatch) {
-        args.push(argMatch[1]!);
-      }
-    }
-  }
-
-  return args;
-}
-
-/**
- * Check if secret credential file exists from output.
- */
-function parseSecretCredentialExists(stdout: string): boolean {
-  const match = stdout.match(/EXISTS=(true|false)/);
-  return match ? match[1] === "true" : false;
-}
 
 // -----------------------------------------------------------------------------
 // Test Runner
@@ -412,6 +337,78 @@ describe("bwrap semantic tests", () => {
    * rules, where the files still exist and exec of the resolved image is
    * permitted, so the same layout works there untouched.
    */
+  /**
+   * The Seatbelt backend has to emit its masked-home deny at BOTH the written
+   * and the realpath spelling of $HOME, and therefore has to emit the rwPath
+   * re-allows at both too — the kernel matches the resolved path, so a deny at
+   * one spelling paired with an allow at the other silently locks the tool out
+   * of its own config directory.
+   *
+   * bwrap does not need the equivalent change, and cannot: it has no separate
+   * deny and allow to keep in sync. `--tmpfs $HOME` and the rwPath `--bind`s
+   * name one destination each, the kernel resolves each destination once inside
+   * the new root, and if that resolution fails the whole launch aborts. There
+   * is no state in which the mask lands and the carve-out misses.
+   *
+   * What a symlinked $HOME does produce on Linux is a hard, pre-existing
+   * failure to launch, in BOTH modes: an absolute symlink inside the new root
+   * resolves against bwrap's own root during setup, where the target does not
+   * exist, so bwrap aborts before exec'ing anything. This is fail-closed —
+   * nothing is exposed — but it is a real limitation, and pinning it here
+   * records which behavior is the known one.
+   */
+  describe("symlinked $HOME", () => {
+    const linkRoot = "/home/testuser/symlinked-home-probe";
+    const realHome = `${linkRoot}/real-home`;
+    const linkedHome = `${linkRoot}/linked-home`;
+
+    beforeAll(async () => {
+      await rm(linkRoot, { recursive: true, force: true });
+      await mkdir(`${realHome}/.claude`, { recursive: true });
+      await writeFile(`${realHome}/.claude/settings.json`, '{"version": 1}\n');
+      await writeFile(`${realHome}/.claude.json`, "{}\n");
+      await symlink(realHome, linkedHome, "dir");
+    });
+
+    afterAll(async () => {
+      await rm(linkRoot, { recursive: true, force: true });
+    });
+
+    test("control: the same layout works when $HOME is the real path", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, stderr, exitCode } = await runAegis(["--hide-home"], {
+        HOME: realHome,
+      });
+      expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
+
+      const claudeDir = parseLsOutput(stdout).get("HOME/.claude");
+      expect(claudeDir?.error).toBeUndefined();
+      expect(claudeDir?.entries).toContain("settings.json");
+    });
+
+    test("--hide-home aborts at the tmpfs rather than launching unmasked", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, exitCode } = await runAegis(["--hide-home"], {
+        HOME: linkedHome,
+      });
+
+      // Fail-closed: bwrap refuses, the tool never runs.
+      expect(exitCode).not.toBe(0);
+      expect(stdout).not.toContain("=== DONE ===");
+    });
+
+    test("plain mode aborts at the $HOME bind for the same reason", async () => {
+      if (!bwrapAvailable) return;
+
+      const { stdout, exitCode } = await runAegis([], { HOME: linkedHome });
+
+      expect(exitCode).not.toBe(0);
+      expect(stdout).not.toContain("=== DONE ===");
+    });
+  });
+
   describe("tool binary installed under $HOME", () => {
     test("baseline: one-hop install runs without --hide-home", async () => {
       if (!bwrapAvailable) return;

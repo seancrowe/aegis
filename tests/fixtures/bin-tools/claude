@@ -51,6 +51,31 @@ ls_dir "$HOME/.gnupg" "HOME/.gnupg"
 # List .claude directory (should be visible even with --hide-home)
 ls_dir "$HOME/.claude" "HOME/.claude"
 
+# Optional write probes let both native backends exercise the same fixture
+# without changing the baseline read-only behavioral output.
+write_probe() {
+    local label="$1"
+    local path="$2"
+    if printf 'aegis-write-probe\n' > "$path" 2>/dev/null; then
+        echo "WRITE:$label=success"
+    else
+        echo "WRITE:$label=failure"
+    fi
+}
+
+if [ -n "$AEGIS_TEST_WRITE_HOME" ]; then
+    write_probe "HOME" "$AEGIS_TEST_WRITE_HOME"
+fi
+if [ -n "$AEGIS_TEST_WRITE_RW" ]; then
+    write_probe "RW_PATH" "$AEGIS_TEST_WRITE_RW"
+fi
+if [ -n "$AEGIS_TEST_WRITE_INSIDE" ]; then
+    write_probe "INSIDE_CWD" "$AEGIS_TEST_WRITE_INSIDE"
+fi
+if [ -n "$AEGIS_TEST_WRITE_OUTSIDE" ]; then
+    write_probe "OUTSIDE_CWD" "$AEGIS_TEST_WRITE_OUTSIDE"
+fi
+
 # Check for secret credential file
 echo ""
 echo "=== SECRET_CREDENTIAL_FILE ==="

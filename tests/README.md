@@ -4,38 +4,43 @@ This document describes how to run the aegis test suite.
 
 ## Test Layers
 
-The test suite is organized into four layers, progressing from fast unit tests to full integration tests:
+The test suite is organized into four layers, with native semantic variants for
+the two supported sandbox kernels:
 
 | Layer | Description | Where to Run |
 |-------|-------------|--------------|
 | Layer 1 | Unit tests (pure transforms) | Local |
 | Layer 2 | CLI dry-run integration tests | Local |
 | Layer 3 | Bwrap semantic tests | Docker only |
+| Layer 3m | Seatbelt semantic tests that execute `sandbox-exec` | Native macOS |
 | Layer 4 | E2E tests with real CLIs | Docker only |
 
 ## Quick Start
 
 ```bash
-# Run L1/L2 tests locally (safe, no Docker required)
+# Run the default local suite (L1/L2 plus the guarded L3m probe)
 bun run test
 
-# Run all tests (L1/L2 locally, L3/L4 in Docker)
+# Run all tests (L1/L2 locally, L3m natively, L3/L4 in Docker)
 bun run scripts/test.ts all
 
 # Run only Docker tests (L3 + L4)
 bun run scripts/test.ts docker
+
+# Run native macOS kernel-enforcement tests
+bun run test:layer3m
 ```
 
-**Note:** Use `bun run test` (not `bun test`) to run the configured L1/L2 tests. Direct `bun test` will attempt to run all test files including Docker-only tests.
+**Note:** Use `bun run test` (not `bun test`) to run the configured local suite. It includes L1/L2 and L3m; L3m records visible skips when native Seatbelt execution is unavailable. Direct `bun test` will attempt to run all test files including Docker-only tests.
 
 ## Running Tests
 
-### Local Tests (L1/L2)
+### Local Tests (L1/L2, plus guarded L3m)
 
 These tests are safe to run locally and don't require Docker or special privileges.
 
 ```bash
-# Run all local tests (default)
+# Run L1/L2 and probe L3m (which skips when Seatbelt is unavailable)
 bun run test
 
 # Run only unit tests
@@ -56,8 +61,33 @@ bun test tests/unit/bwrapArgs.test.ts      # Bwrap argv builder
 
 # Integration tests (L2)
 bun test tests/integration/dryRun.test.ts           # CLI dry-run behavior
+bun test tests/integration/sandboxExecDryRun.test.ts # Seatbelt profile dry runs
 bun test tests/integration/configPersistence.test.ts  # CLI flags not persisted
+bun test tests/integration/metaCommands.test.ts     # init/tools meta-commands
 ```
+
+### Native macOS Tests (L3m)
+
+Layer 3m executes `sandbox-exec`; it does not merely inspect the generated SBPL
+string. Run it from a plain macOS terminal:
+
+```bash
+bun run test:layer3m
+```
+
+If the process is already inside Seatbelt, a nested profile cannot widen access
+denied by the outer profile. The suite probes an allow-default profile first,
+prints a loud explanation, and records visible skips rather than reporting fake
+kernel coverage. The usual symptom is:
+
+```
+sandbox-exec: sandbox_apply: Operation not permitted
+```
+
+The process exits 71. The confirmed nested-sandbox signature is that a profile
+rule naming a **nonexistent** path applies successfully, while the same kind of
+rule naming an **existing** path fails. Leave the assertions and
+`sandbox-exec` execution intact; rerun from a plain terminal.
 
 ### Docker Tests (L3/L4)
 
@@ -128,9 +158,10 @@ bun run scripts/test.ts [options] [layers...]
 |-------|-------------|
 | `local` | Run L1/L2 tests locally (default) |
 | `layer3` | Run L3 bwrap semantic tests in Docker |
+| `layer3m` | Run L3m sandbox-exec semantic tests natively |
 | `layer4` | Run L4 e2e tests in Docker |
 | `docker` | Run L3 + L4 in Docker |
-| `all` | Run all layers (local + docker) |
+| `all` | Run all layers (local + L3m + docker) |
 
 ### Examples
 
@@ -139,6 +170,7 @@ bun run scripts/test.ts              # Run L1/L2 locally
 bun run scripts/test.ts all          # Run all tests
 bun run scripts/test.ts --logs all   # Run all with detailed output
 bun run scripts/test.ts layer3       # Run only L3 in Docker
+bun run scripts/test.ts layer3m      # Run only L3m natively
 bun run scripts/test.ts docker       # Run L3 + L4 in Docker
 ```
 
@@ -147,12 +179,13 @@ bun run scripts/test.ts docker       # Run L3 + L4 in Docker
 For convenience, common test commands are available as npm scripts:
 
 ```bash
-bun run test           # Run L1/L2 locally (bun test)
+bun run test           # Run L1/L2 plus the guarded L3m probe
 bun run test:unit      # Run only unit tests
-bun run test:integration # Run dry-run integration tests
+bun run test:integration # Run local integration tests
 bun run test:all       # Run all layers
 bun run test:docker    # Run L3 + L4 in Docker
 bun run test:layer3    # Run L3 in Docker
+bun run test:layer3m   # Run L3m natively on macOS
 bun run test:layer4    # Run L4 in Docker
 ```
 
@@ -193,10 +226,11 @@ tests/
 │   ├── config.test.ts
 │   ├── paths.test.ts
 │   └── bwrapArgs.test.ts
-├── integration/               # Layer 2 + 3: Integration tests
+├── integration/               # Layer 2 + semantic integration tests
 │   ├── dryRun.test.ts         # L2: CLI dry-run tests (local)
 │   ├── configPersistence.test.ts  # L2: Config persistence tests (local)
-│   └── bwrapSemantic.test.ts  # L3: Real bwrap tests (Docker only)
+│   ├── bwrapSemantic.test.ts  # L3: Real bwrap tests (Docker only)
+│   └── seatbeltSemantic.test.ts # L3m: Real sandbox-exec tests (macOS)
 ├── e2e/                       # Layer 4: End-to-end tests (Docker only)
 │   └── dockerSmoke.test.ts
 ├── fixtures/                  # Test fixtures
@@ -212,7 +246,9 @@ tests/
 │   └── projects/
 │       └── sample/
 ├── utils/                     # Test utilities
-│   └── dockerGuard.ts         # Docker environment detection
+│   ├── dockerGuard.ts         # Docker environment detection
+│   ├── seatbeltGuard.ts       # Native Seatbelt capability probe
+│   └── semanticOutput.ts      # Shared behavioral fixture parser
 ├── docker/                    # Docker configuration
 │   ├── Dockerfile             # Layer 1+2 runner
 │   ├── Dockerfile.layer3      # Layer 3 runner

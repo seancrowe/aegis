@@ -29,6 +29,11 @@ export interface SandboxOptions {
   /** Directories to hide (absolute paths) */
   hidePaths: string[];
   /**
+   * Extra paths to keep readable under a masked home (absolute, ~-expanded).
+   * These never grant write access. Pass [] when unused.
+   */
+  allowRead: string[];
+  /**
    * Extra directories to keep writable beyond cwd and tool config (absolute,
    * ~-expanded). From config.extraWritable. macOS emits an allow rule for each
    * (matches even if the path doesn't exist yet); bwrap RW-binds the ones that
@@ -48,7 +53,7 @@ export interface SandboxOptions {
   homeEntries: string[];
   /** CWD overrides from global config, resolved against CWD. */
   cwdOverrides: ResolvedOverride[];
-  /** Project overrides from .aegis.json, resolved against CWD. */
+  /** Project overrides from .aegis.toml, resolved against CWD. */
   projectOverrides: ResolvedOverride[];
   /**
    * Absolute temp dirs to keep writable (sandbox-exec backend only): the host

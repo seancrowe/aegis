@@ -6,11 +6,11 @@
       "name": "aegis",
       "dependencies": {
         "commander": "14.0.3",
-        "json5": "^2.2.3",
         "typescript-result": "3.5.2",
       },
       "devDependencies": {
         "@types/bun": "latest",
+        "json5": "^2.2.3",
       },
       "peerDependencies": {
         "typescript": "6.0.2",

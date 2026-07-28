@@ -6,14 +6,27 @@ import { Command } from "commander";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { loadConfig, validateHidePaths, expandHidePaths, expandUserPaths } from "./config/config";
-import { resolveExecChain } from "./fs/paths";
+import { Result } from "typescript-result";
+import type { AegisConfig, ConfiguredCliDef } from "./config/config";
+import {
+  expandHidePaths,
+  expandUserPaths,
+  getConfigPath,
+  loadConfig,
+  validateHidePaths,
+  validatePolicyPath,
+} from "./config/config";
+import {
+  resolveAndValidateHidePath,
+  resolveExecChain,
+} from "./fs/paths";
 import {
   loadProjectOverrides,
   resolveOverrides,
   assertContentOverridesSupported,
 } from "./config/overrides";
 import { filterAegisFlags, normalizeToolArgs } from "./tools/tool";
+import { runMetaCommand } from "./tools/metaCommands";
 import {
   createEmptyOverlayDir,
   removeOverlayDir,
@@ -30,7 +43,73 @@ interface SubCmdOpts {
   dryRun?: boolean;
 }
 
+interface ResolvedSandboxSettings {
+  hideHome: boolean;
+  hidePaths: string[];
+  extraWritable: string[];
+}
+
+/**
+ * Resolve every additive sandbox setting at the command boundary so both
+ * backends receive one policy rather than learning config precedence.
+ */
+function resolveSandboxSettings(
+  config: AegisConfig,
+  cliDef: ConfiguredCliDef,
+  options: SubCmdOpts,
+  home: string
+): Result<ResolvedSandboxSettings, Error> {
+  // Global hide stays lenient for backward compatibility; per-tool hide is
+  // strict because this is new surface with no legacy typos to preserve.
+  const configHide = expandHidePaths(config.hide, home);
+  const toolHide = expandUserPaths(cliDef.hide ?? [], home);
+  for (let i = 0; i < toolHide.length; i++) {
+    const validation = validateHidePaths([toolHide[i]!]);
+    if (!validation.ok) {
+      return Result.error(
+        new Error(
+          `${getConfigPath()}: Invalid hide path ${JSON.stringify(cliDef.hide![i])} ` +
+            `in tool "${cliDef.subCommand}": ${validation.error.message}`
+        )
+      );
+    }
+  }
+
+  const cliHide: string[] = [];
+  for (const path of options.hide ?? []) {
+    const resolved = resolveAndValidateHidePath(path, process.cwd());
+    if (!resolved.ok) return Result.error(resolved.error);
+    cliHide.push(resolved.value);
+  }
+
+  for (const path of options.writable ?? []) {
+    const validation = validatePolicyPath(path, "writable");
+    if (!validation.ok) return Result.error(validation.error);
+  }
+
+  // a per-tool hide can only add; only allowRead subtracts.
+  return Result.ok({
+    hideHome:
+      config.homeAccess === "allowlist" ||
+      config.hideHomeAlways ||
+      !!cliDef.hideHomeAlways ||
+      !!options.hideHome,
+    hidePaths: [...configHide, ...toolHide, ...cliHide],
+    extraWritable: expandUserPaths(
+      [
+        ...config.extraWritable,
+        ...(cliDef.extraWritable ?? []),
+        ...(options.writable ?? []),
+      ],
+      home
+    ),
+  });
+}
+
 async function main() {
+  const metaCode = await runMetaCommand(process.argv);
+  if (metaCode !== null) process.exit(metaCode);
+
   // Select the sandbox backend for this platform (bwrap on Linux, sandbox-exec on macOS).
   const backendResult = selectBackend();
   if (!backendResult.ok) {
@@ -54,6 +133,10 @@ async function main() {
   const pkg = await import("../package.json");
 
   const program = new Command();
+  const noToolsGuidance =
+    `No tools configured in ${getConfigPath()}.\n` +
+    "Run `aegis init` to detect installed agents, or " +
+    "`aegis tools add claude`.\n";
   program
     .name("aegis")
     .version(pkg.version, "-V, --version")
@@ -70,7 +153,20 @@ Sandbox flags (pass after the tool, e.g. \`aegis <tool> --hide-home\`):
 Run \`aegis <tool> --help\` for the full per-tool flag list.`
     );
 
-  for (const cliDef of config.clis) {
+  if (config.tools.length === 0) {
+    program.addHelpText("after", `\n${noToolsGuidance.trimEnd()}`);
+    const firstArg = process.argv[2];
+    if (firstArg === undefined) {
+      process.stdout.write(noToolsGuidance);
+      return;
+    }
+    if (!["-h", "--help", "-V", "--version"].includes(firstArg)) {
+      process.stderr.write(noToolsGuidance);
+      process.exit(1);
+    }
+  }
+
+  for (const cliDef of config.tools) {
     program
       .command(cliDef.subCommand)
       .allowUnknownOption(true)
@@ -91,32 +187,36 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
       .argument("[args...]", "Arguments to pass to the tool")
       .action(async (_passedArgs: string[], options: SubCmdOpts) => {
         // 1. Resolve tool path (skip for dry-run since nothing is executed)
-        const toolPath = Bun.which(cliDef.cliCmd) ?? cliDef.cliCmd;
-        if (!options.dryRun && toolPath === cliDef.cliCmd) {
+        const resolvedToolPath = Bun.which(cliDef.cliCmd);
+        const toolPath = resolvedToolPath ?? cliDef.cliCmd;
+        if (!options.dryRun && resolvedToolPath === null) {
           process.stderr.write(`${cliDef.cliCmd} not found in PATH\n`);
           process.exit(1);
         }
 
         // 2. Effective options
-        const hideHome = config.hideHomeAlways || !!options.hideHome;
-        const cliHidePaths: string[] = options.hide || [];
-
-        // 3. Validate hide paths
-        // Config paths: expand ~ and silently skip non-existent (lenient)
         const home = homedir();
-        const configHide = expandHidePaths(config.hide, home);
-        // CLI paths: validate strictly (user just typed them, typos should error)
-        const hideValidation = validateHidePaths(cliHidePaths);
-        if (!hideValidation.ok) {
-          process.stderr.write(hideValidation.error.message + "\n");
+        // Applied in BOTH modes. Allowlist masks $HOME wholesale, which makes
+        // global and per-tool hide entries *under* home redundant — but entries
+        // OUTSIDE home are not covered by the mask. Applying both lists in
+        // allowlist mode prevents the stricter-sounding mode from silently
+        // loosening an explicit deny.
+        const settingsResult = resolveSandboxSettings(
+          config,
+          cliDef,
+          options,
+          home
+        );
+        if (!settingsResult.ok) {
+          process.stderr.write(settingsResult.error.message + "\n");
           process.exit(1);
         }
-        const allHidePaths = [...configHide, ...cliHidePaths];
-
-        const cliWritable: string[] = options.writable || [];
-        const extraWritable = expandUserPaths(
-          [...config.extraWritable, ...cliWritable], home
-        );
+        const { hideHome, hidePaths: allHidePaths, extraWritable } =
+          settingsResult.value;
+        // Match extraWritable's lenient expansion convention: Seatbelt rules
+        // remain useful before a path exists, while bwrap skips missing bind
+        // sources because it cannot bind them safely.
+        const allowRead = expandUserPaths(config.allowRead, home);
 
         // 4. Get raw args from process.argv (after subcommand)
         const subIdx = process.argv.indexOf(cliDef.subCommand, 2);
@@ -149,7 +249,7 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
         //     private tmpfs and ignores this).
         const tmpPaths = backend.needsTmpPaths ? resolveTmpPaths() : [];
 
-        // 8. Load project overrides (.aegis.json)
+        // 8. Load project overrides (.aegis.toml)
         const cwd = process.cwd();
         const projResult = await loadProjectOverrides(cwd);
         if (!projResult.ok) {
@@ -161,8 +261,8 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
 
         // 8b. Reject content-substitution overrides on backends that can't honor them.
         const overrideCheck = assertContentOverridesSupported(backend, [
-          { label: "config.json cwdOverrides", entries: configCwdOverrides },
-          { label: ".aegis.json", entries: projectEntries },
+          { label: "config.toml cwdOverrides", entries: configCwdOverrides },
+          { label: ".aegis.toml", entries: projectEntries },
         ]);
         if (!overrideCheck.ok) {
           process.stderr.write(overrideCheck.error.message + "\n");
@@ -202,6 +302,7 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
           toolArgs,
           hideHome,
           hidePaths: allHidePaths,
+          allowRead,
           extraWritable,
           emptyDir,
           homeEntries,

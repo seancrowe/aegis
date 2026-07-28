@@ -2,20 +2,42 @@
  * Configuration management for aegis.
  */
 import { Result } from "typescript-result";
-import JSON5 from "json5";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, dirname, normalize } from "node:path";
 import { homedir } from "node:os";
 import type { CliDef, RwPath } from "../types";
 import { assertDirectory } from "../fs/paths";
+import {
+  TOOL_CATALOG,
+  renderToolTable,
+  toCliDef,
+} from "../tools/catalog";
 import type { OverrideEntry } from "./overrides";
 import { validateOverrideEntries } from "./overrides";
+import { isTable, parseToml, stripBom } from "./toml";
+import {
+  expandUserPath,
+  rejectControlChars as rejectPolicyControlChars,
+  validatePolicyPath as validateSharedPolicyPath,
+} from "./policyPath";
+
+export interface ToolSandboxSettings {
+  hide?: string[];
+  extraWritable?: string[];
+  hideHomeAlways?: boolean;
+}
+
+export type ConfiguredCliDef = CliDef & ToolSandboxSettings;
 
 export interface AegisConfig {
   hideHomeAlways: boolean;
+  /** Home read policy; blocklist preserves the historical behavior. */
+  homeAccess: "blocklist" | "allowlist";
   /** Paths to hide in the sandbox. Supports ~ for home directory. */
   hide: string[];
+  /** Extra paths to keep readable when home masking is active. Supports ~. */
+  allowRead: string[];
   /**
    * Extra directories to keep writable inside the sandbox, beyond cwd and tool
    * config. Opt-in escape hatch for tools that write outside the project —
@@ -27,7 +49,7 @@ export interface AegisConfig {
   extraWritable: string[];
   /** CWD-relative bind overrides applied globally to every project. */
   cwdOverrides: OverrideEntry[];
-  clis: CliDef[];
+  tools: ConfiguredCliDef[];
 }
 
 /**
@@ -37,11 +59,7 @@ export interface AegisConfig {
  * (the macOS Seatbelt backend matches by path prefix regardless of existence).
  */
 export function expandUserPaths(paths: string[], home: string): string[] {
-  return paths.map((p) => {
-    if (p === "~") return home;
-    if (p.startsWith("~/")) return normalize(join(home, p.slice(2)));
-    return p;
-  });
+  return paths.map((path) => expandUserPath(path, home));
 }
 
 /**
@@ -65,74 +83,8 @@ export function defaultHidePaths(): string[] {
  */
 export function expandHidePaths(paths: string[], home: string): string[] {
   return paths
-    .map((p) => {
-      if (p === "~") return home;
-      if (p.startsWith("~/")) return normalize(join(home, p.slice(2)));
-      return p;
-    })
+    .map((path) => expandUserPath(path, home))
     .filter((p) => existsSync(p));
-}
-
-/**
- * Return the 6 built-in CLI definitions.
- */
-export function defaultCliDefs(): CliDef[] {
-  return [
-    {
-      name: "claude code",
-      cliCmd: "claude",
-      subCommand: "cc",
-      yoloArg: "--dangerously-skip-permissions",
-      rwPaths: [
-        { kind: "dir", path: ".claude" },
-        { kind: "file", path: ".claude.json" },
-      ],
-    },
-    {
-      name: "codex",
-      cliCmd: "codex",
-      subCommand: "codex",
-      yoloArg: "--dangerously-bypass-approvals-and-sandbox",
-      rwPaths: [{ kind: "dir", path: ".codex" }],
-    },
-    {
-      name: "gemini",
-      cliCmd: "gemini",
-      subCommand: "gemini",
-      yoloArg: "--yolo",
-      rwPaths: [{ kind: "dir", path: ".gemini" }],
-    },
-    {
-      name: "augment",
-      cliCmd: "augment",
-      subCommand: "auggie",
-      rwPaths: [
-        { kind: "dir", path: ".augment" },
-        { kind: "file", path: ".augment/settings.json" },
-      ],
-    },
-    {
-      name: "opencode",
-      cliCmd: "opencode",
-      subCommand: "opencode",
-      rwPaths: [
-        { kind: "dir", path: ".config/opencode" },
-        { kind: "file", path: ".config/opencode/opencode.json" },
-        { kind: "dir", path: ".local/share/opencode" },
-        { kind: "file", path: ".local/share/opencode/auth.json" },
-      ],
-    },
-    {
-      name: "crush",
-      cliCmd: "crush",
-      subCommand: "crush",
-      yoloArg: "--yolo",
-      rwPaths: [
-        { kind: "dir", path: ".config/crush" },
-        { kind: "file", path: ".config/crush/crush.json" },
-      ],
-    },
-  ];
 }
 
 /**
@@ -141,177 +93,545 @@ export function defaultCliDefs(): CliDef[] {
 export function defaultConfig(): AegisConfig {
   return {
     hideHomeAlways: false,
+    homeAccess: "blocklist",
     hide: defaultHidePaths(),
+    allowRead: [],
     extraWritable: [],
     cwdOverrides: [],
-    clis: defaultCliDefs(),
+    // A newly scaffolded file contains all six catalog tables, so this
+    // in-memory return must describe those bytes exactly; it is not a runtime
+    // fallback for existing configs that omit tools.
+    tools: TOOL_CATALOG.map((recipe) => toCliDef(recipe)),
   };
 }
 
 /**
- * Serialize config to JSON string.
- */
-export function serializeConfig(config: AegisConfig): string {
-  return JSON.stringify(config, null, 2);
-}
-
-/**
- * The commented JSON5 template written when no config exists yet. Omits the
- * `clis` and `cwdOverrides` fields — parseConfig backfills them — so the
- * generated file stays short and self-documenting. Parsing this template must
- * yield defaultConfig() exactly; the unit suite asserts that to prevent drift.
+ * The commented TOML template written when no config exists yet. Tool tables
+ * come from the same emitter used by migration and future scaffolding, so a
+ * catalog edit cannot leave any of those representations stale.
  */
 export function defaultConfigContent(): string {
-  return `{
-  // aegis config — JSON5, so // comments and trailing commas are allowed.
-  // CLI flags are merged at runtime but never written back here.
+  const tools = TOOL_CATALOG.map((recipe) =>
+    renderToolTable(recipe)
+  ).join("\n");
+  return `# aegis config — TOML.
+# CLI flags are merged at runtime but never written back here.
 
-  // Replace $HOME with an empty view on every run (same as --hide-home).
-  "hideHomeAlways": false,
+# Replace $HOME with an empty view on every run (same as --hide-home).
+hideHomeAlways = false
 
-  // Directories made invisible inside the sandbox. Supports ~.
-  "hide": [
-    "~/.ssh",
-    "~/.gnupg",
-    "~/.aws",
-    "~/.config/gcloud",
-    "~/.azure",
-    "~/.kube",
-  ],
+# Keep today's readable-home-minus-hide model. Use "allowlist" to mask $HOME.
+homeAccess = "blocklist"
 
-  // Extra dirs to keep WRITABLE beyond your project + tool config — the
-  // escape hatch for build/compiler caches a tool writes outside the project.
-  // Uncomment what you use. WARNING: these live under $HOME and some also hold
-  // credentials, so prefer the narrowest subpath that fixes your write error.
-  "extraWritable": [
-    // "~/Library/Developer/Xcode/DerivedData", // Xcode build products
-    // "~/Library/Caches/org.swift.swiftpm",    // Swift Package Manager
-    // "~/.npm",                                 // npm cache
-    // "~/.cargo/registry",                      // Cargo (whole ~/.cargo also holds credentials.toml)
-    // "~/.rustup",                              // Rust toolchains
-    // "~/go/pkg/mod", "~/Library/Caches/go-build", // Go
-    // "~/Library/Caches/pip",                   // pip
-    // "~/.gradle/caches",                       // Gradle (gradle.properties holds signing keys)
-    // "~/.m2/repository",                       // Maven (settings.xml holds repo passwords)
-  ],
+# Directories made invisible inside the sandbox. Supports ~.
+hide = [
+  "~/.ssh",
+  "~/.gnupg",
+  "~/.aws",
+  "~/.config/gcloud",
+  "~/.azure",
+  "~/.kube",
+]
+
+# Extra paths to keep READABLE when $HOME is masked. Supports ~. These never
+# grant write access and explicit hide/--hide rules still win.
+allowRead = []
+
+# Extra dirs to keep WRITABLE beyond your project + tool config — the
+# escape hatch for build/compiler caches a tool writes outside the project.
+# Uncomment what you use. WARNING: these live under $HOME and some also hold
+# credentials, so prefer the narrowest subpath that fixes your write error.
+extraWritable = [
+  # "~/Library/Developer/Xcode/DerivedData", # Xcode build products
+  # "~/Library/Caches/org.swift.swiftpm",    # Swift Package Manager
+  # "~/.npm",                                # npm cache
+  # "~/.cargo/registry",                     # Cargo (whole ~/.cargo also holds credentials.toml)
+  # "~/.rustup",                             # Rust toolchains
+  # "~/go/pkg/mod",                          # Go module cache
+  # "~/Library/Caches/go-build",             # Go build cache
+  # "~/Library/Caches/pip",                  # pip
+  # "~/.gradle/caches",                      # Gradle (gradle.properties holds signing keys)
+  # "~/.m2/repository",                      # Maven (settings.xml holds repo passwords)
+]
+
+${tools}`;
 }
-`;
+
+const TOP_LEVEL_KEYS = new Set([
+  "hideHomeAlways",
+  "homeAccess",
+  "hide",
+  "allowRead",
+  "extraWritable",
+  "cwdOverrides",
+  "tools",
+]);
+const TOOL_KEYS = new Set([
+  "name",
+  "cliCmd",
+  "yoloArg",
+  "rwDirs",
+  "rwFiles",
+  "hide",
+  "extraWritable",
+  "hideHomeAlways",
+]);
+const RESERVED_TOOL_KEYS = new Set(["tools", "init", "help"]);
+
+function configError(configPath: string, message: string): Result<never, Error> {
+  return Result.error(new Error(`${configPath}: ${message}`));
+}
+
+/** Shared so command-line aliases cannot drift from config parsing rules. */
+export function validateToolKey(
+  toolKey: string,
+  configPath: string = getConfigPath()
+): Result<string, Error> {
+  if (
+    toolKey.length === 0 ||
+    !/^[A-Za-z0-9._-]+$/.test(toolKey) ||
+    toolKey.startsWith("-") ||
+    RESERVED_TOOL_KEYS.has(toolKey)
+  ) {
+    return configError(configPath, `Invalid tool key "${toolKey}"`);
+  }
+  return Result.ok(toolKey);
 }
 
 /**
- * Parse and validate config from a JSON5 string. JSON5 is a superset of JSON,
- * so existing plain-JSON configs still parse — but users may now add comments
- * and trailing commas to config.json.
+ * Bun merges repeated tool tables when their fields do not collide, so the
+ * parsed object cannot tell a valid definition from two accidentally combined
+ * definitions. Inspect table headers before parsing while still letting Bun
+ * decide TOML syntax.
+ *
+ * This deliberately scans every line, including lines inside multi-line
+ * strings. The schema's values are booleans, paths, display names, or inline
+ * tables, so a real config does not need a multi-line string containing a
+ * `[tools.x]`-shaped line. In contrast, trying to skip string bodies from this
+ * lightweight scan can be fooled by ordinary comments or quoted display names
+ * and silently miss a duplicate that Bun then merges.
+ *
+ * The tradeoff is intentional: a `[tools.…]`-shaped line inside a multi-line
+ * string is reported as a duplicate. A check built out of "skip these lines"
+ * can only fail silently; over-reporting is a loud error with an obvious fix,
+ * while under-reporting silently merges a tool definition. Bias this check
+ * toward over-reporting.
  */
-export function parseConfig(json: string): Result<AegisConfig, Error> {
-  let raw: unknown;
-  try {
-    raw = JSON5.parse(json);
-  } catch {
-    return Result.error(new Error("Invalid JSON5"));
+function findDuplicateToolTable(toml: string): string | undefined {
+  const seen = new Set<string>();
+  for (const line of toml.split(/\r?\n/)) {
+    const match = line.match(/^\s*\[(?!\[)(.*)\]\s*(?:#.*)?$/);
+    if (!match) continue;
+    try {
+      const header = Bun.TOML.parse(`[${match[1]}]\n`) as unknown;
+      if (!isTable(header)) continue;
+      const topKeys = Object.keys(header);
+      if (topKeys.length !== 1 || topKeys[0] !== "tools") continue;
+      const tools = header.tools;
+      if (!isTable(tools)) continue;
+      const toolKeys = Object.keys(tools);
+      if (toolKeys.length !== 1) continue;
+      const toolKey = toolKeys[0]!;
+      if (!isTable(tools[toolKey]) || Object.keys(tools[toolKey]).length !== 0) {
+        continue;
+      }
+      if (seen.has(toolKey)) return toolKey;
+      seen.add(toolKey);
+    } catch {
+      // The full parser below owns syntax diagnostics, including line numbers.
+    }
+  }
+  return undefined;
+}
+
+function validateStringArray(
+  value: unknown,
+  field: string,
+  configPath: string,
+  required: boolean
+): Result<string[], Error> {
+  if (value === undefined && !required) return Result.ok([]);
+  if (!Array.isArray(value)) {
+    return configError(configPath, `Missing or invalid field: ${field}`);
+  }
+  for (const item of value) {
+    if (typeof item !== "string") {
+      return configError(
+        configPath,
+        `Invalid entry in ${field}: expected string`
+      );
+    }
+  }
+  return Result.ok(value as string[]);
+}
+
+/**
+ * Validate a read/write policy path from any source — config fields, per-tool
+ * tables, or CLI flags. Rejects anything that would widen the sandbox to all of
+ * $HOME or to the filesystem root once expanded, plus relative spellings, which
+ * the backends would resolve against the invoking cwd.
+ *
+ * Absolute spellings that merely sit outside $HOME (including ancestors such as
+ * "/Users") are deliberately permitted: naming one is an explicit choice, and
+ * it is the documented way to grant access the tilde forms cannot express.
+ *
+ * Pass `configPath` to prefix the error for a config-sourced value; omit it for
+ * CLI-sourced values, where a file prefix would be misleading.
+ */
+export function validatePolicyPath(
+  path: string,
+  label: string,
+  configPath?: string
+): Result<string, Error> {
+  const result = validateSharedPolicyPath(path, label);
+  if (result.ok || configPath === undefined) return result;
+  return configError(configPath, result.error.message);
+}
+
+function rejectControlChars(
+  value: string,
+  label: string,
+  configPath?: string
+): Result<string, Error> {
+  const result = rejectPolicyControlChars(value, label);
+  if (result.ok || configPath === undefined) return result;
+  return configError(configPath, result.error.message);
+}
+
+/**
+ * rwPath and cliCmd deliberately keep a stricter boundary than other policy
+ * paths: they reject quotes as well as controls. Do not fold this into
+ * rejectControlChars. Quotes are legal macOS path characters, and hide,
+ * allowRead, and extraWritable are safely escaped by sbplEscape.
+ */
+function assertPolicySafe(
+  value: string,
+  label: string,
+  configPath: string
+): Result<string, Error> {
+  const safe = rejectControlChars(value, label, configPath);
+  if (!safe.ok || value.includes('"')) {
+    return configError(
+      configPath,
+      `Invalid ${label}: control characters and quotes are not allowed, got ${JSON.stringify(value)}`
+    );
+  }
+  return Result.ok(value);
+}
+
+export function validateRwPath(
+  path: string,
+  configPath: string = getConfigPath()
+): Result<string, Error> {
+  // rwPaths are joined onto $HOME (main.ts), so anything resolving to "."
+  // grants all of $HOME and can undo --hide-home. Judge tilde use on the raw
+  // spelling, then store a normalized path for deterministic downstream joins.
+  if (path.length === 0) {
+    return configError(
+      configPath,
+      `Invalid rwPath: path must not be empty, got "${path}"`
+    );
+  }
+  if (path === "~" || path.startsWith("~/")) {
+    return configError(
+      configPath,
+      `Invalid rwPath: tilde is not expanded for rwPaths, got "${path}"`
+    );
+  }
+  const safe = assertPolicySafe(path, "rwPath", configPath);
+  if (!safe.ok) return Result.error(safe.error);
+  const normalized = normalize(path);
+  const normalizedPath =
+    normalized === "/" ? normalized : normalized.replace(/\/+$/, "");
+  if (normalizedPath === ".") {
+    return configError(
+      configPath,
+      `Invalid rwPath: path must not resolve to the home directory, got "${path}"`
+    );
+  }
+  if (normalizedPath.startsWith("/")) {
+    return configError(
+      configPath,
+      `Invalid rwPath: path must be relative, got "${path}"`
+    );
+  }
+  if (normalizedPath.split("/").some((component) => component === "..")) {
+    return configError(
+      configPath,
+      `Invalid rwPath: path must be relative without traversal, got "${path}"`
+    );
+  }
+  return Result.ok(normalizedPath);
+}
+
+/** Parse and validate a TOML config document. */
+export function parseConfig(
+  toml: string,
+  configPath: string = getConfigPath()
+): Result<AegisConfig, Error> {
+  // The empty-document guard below separately prevents a silent empty policy.
+  const content = stripBom(toml);
+  const duplicateTool = findDuplicateToolTable(content);
+  if (duplicateTool !== undefined) {
+    return configError(
+      configPath,
+      `Duplicate tool table "${duplicateTool}"; define each [tools.<name>] once`
+    );
   }
 
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return Result.error(new Error("Config must be a JSON object"));
+  const parsed = parseToml(content, configPath);
+  if (!parsed.ok) return Result.error(parsed.error);
+  const raw = parsed.value;
+
+  if (!isTable(raw)) {
+    return configError(configPath, "Config must be a TOML document");
   }
   const obj = raw as Record<string, unknown>;
 
-  // Validate hideHomeAlways
+  if (Object.keys(obj).length === 0) {
+    return configError(
+      configPath,
+      "Config contains no recognized top-level keys"
+    );
+  }
+  for (const key of Object.keys(obj)) {
+    if (!TOP_LEVEL_KEYS.has(key)) {
+      return configError(configPath, `Unknown top-level key "${key}"`);
+    }
+  }
+
   if (typeof obj.hideHomeAlways !== "boolean") {
-    return Result.error(new Error("Missing or invalid field: hideHomeAlways"));
+    return configError(
+      configPath,
+      "Missing or invalid field: hideHomeAlways"
+    );
   }
 
-  // Validate hide
-  if (!Array.isArray(obj.hide)) {
-    return Result.error(new Error("Missing or invalid field: hide"));
-  }
-  for (const item of obj.hide) {
-    if (typeof item !== "string") {
-      return Result.error(new Error("Invalid entry in hide: expected string"));
-    }
+  const homeAccess = obj.homeAccess ?? "blocklist";
+  if (homeAccess !== "blocklist" && homeAccess !== "allowlist") {
+    return configError(
+      configPath,
+      'Invalid homeAccess: expected "blocklist" or "allowlist"'
+    );
   }
 
-  // Validate extraWritable (optional, default to [])
-  let extraWritable: string[] = [];
-  if (obj.extraWritable !== undefined) {
-    if (!Array.isArray(obj.extraWritable)) {
-      return Result.error(new Error("Invalid field: extraWritable"));
-    }
-    for (const item of obj.extraWritable) {
-      if (typeof item !== "string") {
-        return Result.error(
-          new Error("Invalid entry in extraWritable: expected string")
-        );
-      }
-    }
-    extraWritable = obj.extraWritable as string[];
+  const hideResult = validateStringArray(obj.hide, "hide", configPath, true);
+  if (!hideResult.ok) return Result.error(hideResult.error);
+  for (const path of hideResult.value) {
+    const pathResult = validatePolicyPath(path, "hide", configPath);
+    if (!pathResult.ok) return Result.error(pathResult.error);
   }
 
-  // Validate cwdOverrides (optional, default to [])
+  const allowReadResult = validateStringArray(
+    obj.allowRead,
+    "allowRead",
+    configPath,
+    false
+  );
+  if (!allowReadResult.ok) return Result.error(allowReadResult.error);
+  for (const path of allowReadResult.value) {
+    const pathResult = validatePolicyPath(path, "allowRead", configPath);
+    if (!pathResult.ok) return Result.error(pathResult.error);
+  }
+
+  const extraWritableResult = validateStringArray(
+    obj.extraWritable,
+    "extraWritable",
+    configPath,
+    false
+  );
+  if (!extraWritableResult.ok) {
+    return Result.error(extraWritableResult.error);
+  }
+  for (const path of extraWritableResult.value) {
+    const pathResult = validatePolicyPath(
+      path,
+      "extraWritable",
+      configPath
+    );
+    if (!pathResult.ok) return Result.error(pathResult.error);
+  }
+
   let cwdOverrides: OverrideEntry[] = [];
   if (obj.cwdOverrides !== undefined) {
     const ovResult = validateOverrideEntries(obj.cwdOverrides);
-    if (!ovResult.ok) return Result.error(ovResult.error);
+    if (!ovResult.ok) {
+      return configError(configPath, ovResult.error.message);
+    }
     cwdOverrides = ovResult.value;
   }
 
-  // Validate clis (optional, backfill with defaults)
-  let clis: CliDef[];
-  if (obj.clis === undefined) {
-    clis = defaultCliDefs();
+  let tools: ConfiguredCliDef[];
+  if (obj.tools === undefined) {
+    tools = [];
   } else {
-    if (!Array.isArray(obj.clis)) {
-      return Result.error(new Error("Invalid field: clis"));
+    if (Array.isArray(obj.tools)) {
+      return configError(
+        configPath,
+        "Invalid tools migration: use `[tools.<name>]` tables, not `[[tools]]`"
+      );
     }
-    const subCommands = new Set<string>();
-    clis = [];
-    for (const entry of obj.clis) {
-      if (typeof entry.name !== "string") return Result.error(new Error("Invalid cli entry: missing name"));
-      if (typeof entry.cliCmd !== "string") return Result.error(new Error("Invalid cli entry: missing cliCmd"));
-      if (typeof entry.subCommand !== "string") return Result.error(new Error("Invalid cli entry: missing subCommand"));
-      if (!Array.isArray(entry.rwPaths)) return Result.error(new Error("Invalid cli entry: missing rwPaths"));
-
-      if (subCommands.has(entry.subCommand)) {
-        return Result.error(new Error(`Duplicate subCommand: ${entry.subCommand}`));
+    if (!isTable(obj.tools)) {
+      return configError(configPath, "Invalid field: tools must be a table");
+    }
+    tools = [];
+    for (const [subCommand, rawEntry] of Object.entries(obj.tools)) {
+      const toolKeyResult = validateToolKey(subCommand, configPath);
+      if (!toolKeyResult.ok) return Result.error(toolKeyResult.error);
+      if (!isTable(rawEntry)) {
+        return configError(
+          configPath,
+          `Tool "${subCommand}" value must be a table with cliCmd`
+        );
       }
-      subCommands.add(entry.subCommand);
+      const entry = rawEntry as Record<string, unknown>;
+      if (
+        entry.cliCmd === undefined &&
+        Object.values(entry).some((value) => isTable(value))
+      ) {
+        return configError(
+          configPath,
+          `Tool "${subCommand}" value must be a table with cliCmd`
+        );
+      }
+      for (const key of Object.keys(entry)) {
+        if (key === "rwPaths") {
+          return configError(
+            configPath,
+            `Unknown key "rwPaths" in tool "${subCommand}"; use rwDirs/rwFiles`
+          );
+        }
+        if (!TOOL_KEYS.has(key)) {
+          return configError(
+            configPath,
+            `Unknown key "${key}" in tool "${subCommand}"`
+          );
+        }
+      }
+      if (typeof entry.cliCmd !== "string") {
+        return configError(
+          configPath,
+          `Tool "${subCommand}" value must be a table with cliCmd`
+        );
+      }
+      // cliCmd becomes toolPath and is emitted into the Seatbelt profile as a
+      // (literal "…"), so it needs the same boundary as an rwPath.
+      const safeCliCmd = assertPolicySafe(
+        entry.cliCmd,
+        `cliCmd in tool "${subCommand}"`,
+        configPath
+      );
+      if (!safeCliCmd.ok) return Result.error(safeCliCmd.error);
+      if (typeof entry.name !== "string") {
+        return configError(
+          configPath,
+          `Invalid tool "${subCommand}": missing name`
+        );
+      }
+      const dirsResult = validateStringArray(
+        entry.rwDirs,
+        `tools.${subCommand}.rwDirs`,
+        configPath,
+        false
+      );
+      if (!dirsResult.ok) return Result.error(dirsResult.error);
+      const filesResult = validateStringArray(
+        entry.rwFiles,
+        `tools.${subCommand}.rwFiles`,
+        configPath,
+        false
+      );
+      if (!filesResult.ok) return Result.error(filesResult.error);
+      const toolHideResult = validateStringArray(
+        entry.hide,
+        `tools.${subCommand}.hide`,
+        configPath,
+        false
+      );
+      if (!toolHideResult.ok) return Result.error(toolHideResult.error);
+      for (const path of toolHideResult.value) {
+        const pathResult = validatePolicyPath(
+          path,
+          `tools.${subCommand}.hide`,
+          configPath
+        );
+        if (!pathResult.ok) return Result.error(pathResult.error);
+      }
+      const toolExtraWritableResult = validateStringArray(
+        entry.extraWritable,
+        `tools.${subCommand}.extraWritable`,
+        configPath,
+        false
+      );
+      if (!toolExtraWritableResult.ok) {
+        return Result.error(toolExtraWritableResult.error);
+      }
+      for (const path of toolExtraWritableResult.value) {
+        const pathResult = validatePolicyPath(
+          path,
+          `tools.${subCommand}.extraWritable`,
+          configPath
+        );
+        if (!pathResult.ok) return Result.error(pathResult.error);
+      }
+      if (
+        entry.hideHomeAlways !== undefined &&
+        typeof entry.hideHomeAlways !== "boolean"
+      ) {
+        return configError(
+          configPath,
+          `Invalid tool "${subCommand}": hideHomeAlways must be a boolean`
+        );
+      }
 
+      // bwrap creates file mountpoints inside their parent directory, so
+      // directories must structurally precede files regardless of TOML order.
       const rwPaths: RwPath[] = [];
-      for (const rp of entry.rwPaths) {
-        if (rp.kind !== "file" && rp.kind !== "dir") {
-          return Result.error(new Error(`Invalid rwPath kind: ${rp.kind}`));
+      for (const [kind, paths] of [
+        ["dir", dirsResult.value],
+        ["file", filesResult.value],
+      ] as const) {
+        for (const path of paths) {
+          const pathResult = validateRwPath(path, configPath);
+          if (!pathResult.ok) return Result.error(pathResult.error);
+          rwPaths.push({ kind, path: pathResult.value });
         }
-        if (typeof rp.path !== "string") {
-          return Result.error(new Error("Invalid rwPath: missing path"));
-        }
-        if (rp.path.startsWith("/") || rp.path.split("/").some((component: string) => component === "..")) {
-          return Result.error(new Error(`Invalid rwPath: path must be relative without traversal, got "${rp.path}"`));
-        }
-        rwPaths.push({ kind: rp.kind, path: rp.path });
       }
 
-      const def: CliDef = {
-        name: entry.name,
-        cliCmd: entry.cliCmd,
-        subCommand: entry.subCommand,
+      const def: ConfiguredCliDef = {
+        name: entry.name as string,
+        cliCmd: entry.cliCmd as string,
+        subCommand,
         rwPaths,
       };
+      if (entry.hide !== undefined) def.hide = toolHideResult.value;
+      if (entry.extraWritable !== undefined) {
+        def.extraWritable = toolExtraWritableResult.value;
+      }
+      if (entry.hideHomeAlways !== undefined) {
+        def.hideHomeAlways = entry.hideHomeAlways;
+      }
       if (entry.yoloArg !== undefined) {
         if (typeof entry.yoloArg !== "string") {
-          return Result.error(new Error("Invalid cli entry: yoloArg must be a string"));
+          return configError(
+            configPath,
+            `Invalid tool "${subCommand}": yoloArg must be a string`
+          );
         }
         def.yoloArg = entry.yoloArg;
       }
-      clis.push(def);
+      tools.push(def);
     }
   }
 
   return Result.ok({
     hideHomeAlways: obj.hideHomeAlways as boolean,
-    hide: obj.hide as string[],
-    extraWritable,
+    homeAccess,
+    hide: hideResult.value,
+    allowRead: allowReadResult.value,
+    extraWritable: extraWritableResult.value,
     cwdOverrides,
-    clis,
+    tools,
   });
 }
 
@@ -324,7 +644,7 @@ export function parseConfig(json: string): Result<AegisConfig, Error> {
  */
 export function getConfigPath(): string {
   const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(configHome, "aegis", "config.json");
+  return join(configHome, "aegis", "config.toml");
 }
 
 /**
@@ -334,6 +654,25 @@ export async function loadConfig(): Promise<Result<AegisConfig, Error>> {
   const configPath = getConfigPath();
 
   if (!existsSync(configPath)) {
+    const legacyPath = join(dirname(configPath), "config.json");
+    if (existsSync(legacyPath)) {
+      // Refuse rather than scaffold a fresh config: writing the template here
+      // would silently drop whatever the user had added (extraWritable entries
+      // especially) with no signal that it happened. The command has to be
+      // copy-pasteable — this error is the only instruction an existing
+      // install ever gets.
+      return Result.error(
+        new Error(
+          `aegis: found a legacy JSON config and no ${configPath}.\n\n` +
+            `  ${legacyPath}\n\n` +
+            `aegis now reads TOML. Convert it, review the result, then move it into place:\n\n` +
+            `  bun run scripts/config-to-toml.ts "${legacyPath}" "${configPath}"\n\n` +
+            `That converter ships with the aegis source, not the compiled binary — ` +
+            `run it from a source checkout of aegis.\n` +
+            `Nothing is written until you run that; the JSON file is left untouched.`
+        )
+      );
+    }
     const dir = dirname(configPath);
     await mkdir(dir, { recursive: true });
     const defaultCfg = defaultConfig();
@@ -344,16 +683,27 @@ export async function loadConfig(): Promise<Result<AegisConfig, Error>> {
   }
 
   const content = await readFile(configPath, "utf-8");
-  return parseConfig(content);
+  return parseConfig(content, configPath);
 }
 
 /**
- * Validate that all hide paths in config exist and are directories.
+ * Validate that per-tool hide paths exist and are directories.
+ *
+ * This serves per-tool hides only — its sole caller resolves `tools.<x>.hide`.
+ * CLI `--hide` takes a different route (resolveAndValidateHidePath), so a check
+ * added here does not cover it; state any deny-side rule in both places or
+ * neither.
+ *
+ * Deny-side paths get the home/root check even though over-denying is
+ * fail-closed: `--hide ~/../..` denies `/` and breaks the tool outright, which
+ * is worth an error rather than a baffling sandbox.
  */
 export function validateHidePaths(
   paths: string[]
 ): Result<string[], Error> {
   for (const p of paths) {
+    const safe = validatePolicyPath(p, "tool hide");
+    if (!safe.ok) return Result.error(safe.error);
     const check = assertDirectory(p);
     if (!check.ok) return Result.error(check.error);
   }

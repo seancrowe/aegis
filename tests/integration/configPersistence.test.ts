@@ -3,15 +3,13 @@
  * These tests verify that CLI flags do NOT modify persistent config.
  *
  * The key invariant is that runtime CLI flags (like --hide <dir>) should
- * only affect the current invocation and never be written to config.json.
+ * only affect the current invocation and never be written to config.toml.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
-import JSON5 from "json5";
-import type { CliDef } from "../../src/types";
 import { defaultHidePaths } from "../../src/config/config";
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
@@ -19,7 +17,23 @@ const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
 interface AegisConfig {
   hideHomeAlways: boolean;
   hide: string[];
-  clis?: CliDef[];
+}
+
+function configToml(hideHomeAlways: boolean, hide: string[]): string {
+  return `hideHomeAlways = ${hideHomeAlways}
+hide = [${hide.map((path) => JSON.stringify(path)).join(", ")}]
+
+[tools.cc]
+name = "claude code"
+cliCmd = "claude"
+yoloArg = "--dangerously-skip-permissions"
+rwDirs = [".claude"]
+rwFiles = [".claude.json"]
+`;
+}
+
+function parseConfigToml(content: string): AegisConfig {
+  return Bun.TOML.parse(content) as unknown as AegisConfig;
 }
 
 /**
@@ -60,7 +74,7 @@ async function runAegisDryRun(
   return { stdout, stderr, exitCode };
 }
 
-describe("config persistence - CLI flags should not modify config.json", () => {
+describe("config persistence - CLI flags should not modify config.toml", () => {
   let tempDir: string;
   let tempHome: string;
   let tempConfig: string;
@@ -88,24 +102,20 @@ describe("config persistence - CLI flags should not modify config.json", () => {
     // Create aegis config directory and config file
     const aegisConfigDir = join(tempConfig, "aegis");
     await mkdir(aegisConfigDir, { recursive: true });
-    configPath = join(aegisConfigDir, "config.json");
+    configPath = join(aegisConfigDir, "config.toml");
 
     // Start with empty hide array in config
-    const initialConfig: AegisConfig = {
-      hideHomeAlways: false,
-      hide: [],
-    };
-    await writeFile(configPath, JSON.stringify(initialConfig, null, 2));
+    await writeFile(configPath, configToml(false, []));
   });
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("--hide flag does NOT persist to config.json", async () => {
+  test("--hide flag does NOT persist to config.toml", async () => {
     // Read initial config
     const initialConfigContent = await readFile(configPath, "utf-8");
-    const initialConfig: AegisConfig = JSON.parse(initialConfigContent);
+    const initialConfig = parseConfigToml(initialConfigContent);
     expect(initialConfig.hide).toEqual([]);
 
     // Run aegis with --hide flag
@@ -121,17 +131,17 @@ describe("config persistence - CLI flags should not modify config.json", () => {
 
     // Re-read config after running aegis
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON.parse(afterConfigContent);
+    const afterConfig = parseConfigToml(afterConfigContent);
 
     // Assert the hide path was NOT persisted
     expect(afterConfig.hide).toEqual([]);
     expect(afterConfig.hide).not.toContain(tempHide);
   });
 
-  test("--hide-home flag does NOT persist hideHomeAlways to config.json", async () => {
+  test("--hide-home flag does NOT persist hideHomeAlways to config.toml", async () => {
     // Read initial config
     const initialConfigContent = await readFile(configPath, "utf-8");
-    const initialConfig: AegisConfig = JSON.parse(initialConfigContent);
+    const initialConfig = parseConfigToml(initialConfigContent);
     expect(initialConfig.hideHomeAlways).toBe(false);
 
     // Run aegis with --hide-home flag
@@ -147,19 +157,19 @@ describe("config persistence - CLI flags should not modify config.json", () => {
 
     // Re-read config after running aegis
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON.parse(afterConfigContent);
+    const afterConfig = parseConfigToml(afterConfigContent);
 
     // Assert hideHomeAlways was NOT changed
     expect(afterConfig.hideHomeAlways).toBe(false);
   });
 
-  test("multiple --hide flags do NOT persist to config.json", async () => {
+  test("multiple --hide flags do NOT persist to config.toml", async () => {
     const tempHide2 = join(tempDir, "hideme2");
     await mkdir(tempHide2, { recursive: true });
 
     // Read initial config
     const initialConfigContent = await readFile(configPath, "utf-8");
-    const initialConfig: AegisConfig = JSON.parse(initialConfigContent);
+    const initialConfig = parseConfigToml(initialConfigContent);
     expect(initialConfig.hide).toEqual([]);
 
     // Run aegis with multiple --hide flags
@@ -175,7 +185,7 @@ describe("config persistence - CLI flags should not modify config.json", () => {
 
     // Re-read config after running aegis
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON.parse(afterConfigContent);
+    const afterConfig = parseConfigToml(afterConfigContent);
 
     // Assert none of the hide paths were persisted
     expect(afterConfig.hide).toEqual([]);
@@ -189,11 +199,7 @@ describe("config persistence - CLI flags should not modify config.json", () => {
     await mkdir(existingHidePath, { recursive: true });
 
     // Update config with existing hide path
-    const configWithExisting: AegisConfig = {
-      hideHomeAlways: false,
-      hide: [existingHidePath],
-    };
-    await writeFile(configPath, JSON.stringify(configWithExisting, null, 2));
+    await writeFile(configPath, configToml(false, [existingHidePath]));
 
     // Run aegis with a new --hide flag
     const { exitCode } = await runAegisDryRun(
@@ -208,7 +214,7 @@ describe("config persistence - CLI flags should not modify config.json", () => {
 
     // Re-read config after running aegis
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON.parse(afterConfigContent);
+    const afterConfig = parseConfigToml(afterConfigContent);
 
     // Assert config still has only the existing path, not the CLI path
     expect(afterConfig.hide).toEqual([existingHidePath]);
@@ -232,10 +238,10 @@ describe("config persistence - CLI flags should not modify config.json", () => {
     // The command should succeed
     expect(exitCode).toBe(0);
 
-    // Config file should be created (per plan.md spec). It's written as a
-    // commented JSON5 template, so parse with JSON5 rather than JSON.
+    // Config file should be created (per plan.md spec). Comments are native
+    // TOML, so the same parser used by aegis can inspect it.
     const afterConfigContent = await readFile(configPath, "utf-8");
-    const afterConfig: AegisConfig = JSON5.parse(afterConfigContent);
+    const afterConfig = parseConfigToml(afterConfigContent);
 
     // Critical invariant: CLI hide path must NOT be persisted
     expect(afterConfig.hide).toEqual(defaultHidePaths());

@@ -9,7 +9,7 @@ import {
   filterAegisFlags,
   getCliDef,
 } from "../../src/tools/tool";
-import { defaultCliDefs } from "../../src/config/config";
+import { defaultCliDefs } from "../../src/tools/catalog";
 import type { CliDef } from "../../src/types";
 
 // Build lookup from defaults (replaces 6 individual imports)

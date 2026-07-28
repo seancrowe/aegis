@@ -10,7 +10,7 @@ import {
   buildBwrapCommand,
   type BwrapOptions,
 } from "../../src/sandbox/bwrap";
-import { defaultCliDefs } from "../../src/config/config";
+import { defaultCliDefs } from "../../src/tools/catalog";
 import type { CliDef } from "../../src/types";
 
 const defaults = defaultCliDefs();
@@ -29,6 +29,7 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
     toolArgs: ["--version"],
     hideHome: false,
     hidePaths: [],
+    allowRead: [],
     extraWritable: [],
     emptyDir: "",
     homeEntries: [],
@@ -79,6 +80,47 @@ function findSequenceIndex(arr: string[], sequence: string[]): number {
 }
 
 describe("buildBwrapArgs", () => {
+  describe("allowRead", () => {
+    test("RO-binds an existing path under a masked home", () => {
+      const real = tmpdir();
+      const result = buildBwrapArgs(
+        makeOpts({ hideHome: true, allowRead: [real] })
+      );
+      Result.assertOk(result);
+      expect(containsSequence(result.value, ["--ro-bind", real, real])).toBe(true);
+    });
+
+    test("skips a non-existent path instead of emitting a failing bind", () => {
+      const missing = "/no/such/readable/path-xyz";
+      const result = buildBwrapArgs(
+        makeOpts({ hideHome: true, allowRead: [missing] })
+      );
+      Result.assertOk(result);
+      expect(result.value).not.toContain(missing);
+    });
+
+    test("explicit hide overlays come after allowRead binds", () => {
+      const real = tmpdir();
+      const result = buildBwrapArgs(
+        makeOpts({
+          hideHome: true,
+          allowRead: [real],
+          hidePaths: [real],
+          emptyDir: "/tmp/empty",
+        })
+      );
+      Result.assertOk(result);
+      const allowIdx = findSequenceIndex(result.value, ["--ro-bind", real, real]);
+      const hideIdx = findSequenceIndex(result.value, [
+        "--ro-bind",
+        "/tmp/empty",
+        real,
+      ]);
+      expect(allowIdx).toBeGreaterThanOrEqual(0);
+      expect(hideIdx).toBeGreaterThan(allowIdx);
+    });
+  });
+
   describe("extraWritable", () => {
     test("RW-binds an existing extra path", () => {
       // tmpdir() exists on every host; use it as a stand-in for a cache dir.
@@ -137,6 +179,12 @@ describe("buildBwrapArgs", () => {
       const result = buildBwrapArgs(makeOpts());
       Result.assertOk(result);
       expect(containsSequence(result.value, ["--ro-bind", "/", "/"])).toBe(true);
+      const rootPairs = result.value.filter((arg, index) =>
+        (arg === "--bind" || arg === "--ro-bind") &&
+        result.value[index + 1] === "/" &&
+        result.value[index + 2] === "/"
+      );
+      expect(rootPairs).toEqual(["--ro-bind"]);
     });
 
     test("includes --dev /dev", () => {
@@ -332,7 +380,7 @@ describe("buildBwrapArgs", () => {
   });
 
   describe("--hide-home mode", () => {
-    test("includes --tmpfs $HOME when hide-home enabled", () => {
+    test("masks home with a writable tmpfs (diverges from macOS — see TODO in bwrap.ts)", () => {
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
@@ -342,6 +390,22 @@ describe("buildBwrapArgs", () => {
       expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(
         true
       );
+      // The tmpfs is the only operation targeting $HOME itself: no later
+      // read-only overlay or remount changes its writable semantics.
+      expect(result.value.filter((arg) => arg === opts.home)).toHaveLength(1);
+    });
+
+    test("never binds $HOME itself for a registered tool", () => {
+      // Seatbelt's mirror of this lives in sandboxProfile.test.ts. An rwPath
+      // that resolves to $HOME would re-bind home read-write on top of the
+      // tmpfs, undoing --hide-home; parseConfig rejects those, and this is the
+      // assertion that catches it if the rejection is ever loosened.
+      const opts = makeOpts({ hideHome: true, home: "/home/user" });
+      const result = buildBwrapArgs(opts);
+      Result.assertOk(result);
+      expect(
+        containsSequence(result.value, ["--bind", "/home/user", "/home/user"])
+      ).toBe(false);
     });
 
     test("still includes tool config binds after tmpfs $HOME", () => {
@@ -1312,5 +1376,46 @@ describe("buildBwrapArgs — tool binary carve-out", () => {
         "/home/user/.local/share/claude/versions/1.0.0",
       ])
     ).toBe(true);
+  });
+});
+
+describe("buildBwrapArgs — masked home spelling", () => {
+  // The Seatbelt backend must emit its masked-home deny at both the written and
+  // the realpath spelling of $HOME, and therefore must emit the rwPath
+  // re-allows at both as well. bwrap needs no counterpart: it has no separate
+  // deny and allow to keep in sync. The mask (--tmpfs $HOME) and the carve-outs
+  // (--dir / --bind under $HOME) are all destinations under one spelling, the
+  // kernel resolves each once inside the new root, and a resolution failure
+  // aborts the launch outright instead of applying the mask without the
+  // carve-out. Emitting a second, canonicalized spelling here would only add
+  // mounts at paths the first set already covers.
+  //
+  // The Layer 3 counterpart (tests/integration/bwrapSemantic.test.ts,
+  // "symlinked $HOME") confirms the runtime half against real bwrap: a
+  // symlinked $HOME aborts with a nonzero exit in both modes.
+  test("masks and carves out $HOME at exactly one spelling", () => {
+    const result = buildBwrapArgs(
+      makeOpts({ home: "/home/user", hideHome: true })
+    );
+    Result.assertOk(result);
+
+    expect(result.value.filter((a) => a === "--tmpfs")).toHaveLength(2); // $HOME + /tmp
+    expect(containsSequence(result.value, ["--tmpfs", "/home/user"])).toBe(true);
+    expect(
+      containsSequence(result.value, ["--dir", "/home/user/.claude"])
+    ).toBe(true);
+    expect(
+      containsSequence(result.value, [
+        "--bind",
+        "/home/user/.claude",
+        "/home/user/.claude",
+      ])
+    ).toBe(true);
+
+    // Every $HOME-derived path uses the written spelling; nothing is emitted at
+    // a second, resolved one.
+    const homePaths = result.value.filter((a) => a.startsWith("/home/user"));
+    expect(new Set(homePaths).size).toBeGreaterThan(0);
+    expect(homePaths.every((p) => p.startsWith("/home/user"))).toBe(true);
   });
 });

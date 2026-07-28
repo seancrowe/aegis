@@ -1,27 +1,31 @@
 {
   "name": "aegis",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "module": "src/main.ts",
   "type": "module",
-  "private": true,
+  "private": false,
+  "engines": {
+    "bun": "1.3.14"
+  },
   "scripts": {
     "dev": "bun run src/main.ts",
     "build": "bun run scripts/build.js",
-    "test": "bun test tests/unit tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts",
+    "test": "bun test tests/unit tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts tests/integration/metaCommands.test.ts",
     "test:unit": "bun test tests/unit",
-    "test:integration": "bun test tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts",
+    "test:integration": "bun test tests/integration/dryRun.test.ts tests/integration/sandboxExecDryRun.test.ts tests/integration/configPersistence.test.ts tests/integration/metaCommands.test.ts",
     "test:all": "bun run scripts/test.ts all",
     "test:docker": "bun run scripts/test.ts docker",
     "test:layer3": "bun run scripts/test.ts layer3",
+    "test:layer3m": "bun run scripts/test.ts layer3m",
     "test:layer4": "bun run scripts/test.ts layer4"
   },
   "dependencies": {
     "commander": "14.0.3",
-    "json5": "^2.2.3",
     "typescript-result": "3.5.2"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "json5": "^2.2.3"
   },
   "peerDependencies": {
     "typescript": "6.0.2"
