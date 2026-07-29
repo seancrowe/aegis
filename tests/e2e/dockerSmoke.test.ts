@@ -22,6 +22,11 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import { spawn } from "bun";
 import { resolve } from "node:path";
 import { requireDocker } from "../utils/dockerGuard";
+import { seedCatalogConfigForHome } from "../utils/catalogConfig";
+
+// The first-run scaffold configures no tools, so every suite here has to opt
+// the catalog in before `aegis <tool>` has a subcommand to dispatch.
+const TEST_HOME = process.env.HOME ?? "/root";
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
 
@@ -46,7 +51,7 @@ interface CliConfig {
  */
 const CLI_TOOLS: CliConfig[] = [
   {
-    aegisName: "cc",
+    aegisName: "claude",
     binaryName: "claude",
     npmPackage: "@anthropic-ai/claude-code",
     versionPatterns: [/version|claude|\d+\.\d+/i],
@@ -207,6 +212,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
   beforeAll(async () => {
     // Ensure this test only runs in Docker
     requireDocker("Layer 4 (e2e)");
+    await seedCatalogConfigForHome(TEST_HOME);
 
     console.log("\n=== Checking CLI availability ===");
     for (const cli of CLI_TOOLS) {
@@ -286,7 +292,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
 
   describe("CLI availability summary", () => {
     test("Claude Code CLI MUST be available for meaningful tests", async () => {
-      const claudeAvailable = cliAvailability.get("cc");
+      const claudeAvailable = cliAvailability.get("claude");
 
       // Claude Code is the primary CLI and MUST be available
       // Other CLIs can remain optional
@@ -308,7 +314,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
 
       // Log which optional CLIs are missing (informational only)
       for (const cli of CLI_TOOLS) {
-        if (cli.aegisName !== "cc" && !cliAvailability.get(cli.aegisName)) {
+        if (cli.aegisName !== "claude" && !cliAvailability.get(cli.aegisName)) {
           console.log(`Optional CLI not installed: ${cli.aegisName} (${cli.npmPackage})`);
         }
       }
@@ -335,7 +341,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
       expect(output).toMatch(/\d+\.\d+/);
     });
 
-    test("aegis cc --version exits 0 when direct CLI exits 0", async () => {
+    test("aegis claude --version exits 0 when direct CLI exits 0", async () => {
       const claudeAvailable = await isCliAvailable("claude");
       if (!claudeAvailable) {
         throw new Error("Claude Code CLI not available - test cannot run");
@@ -346,24 +352,24 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
       expect(directResult.exitCode).toBe(0);
 
       // Now verify aegis wrapper also succeeds
-      const { stdout, stderr, exitCode } = await runAegis("cc", ["--version"]);
+      const { stdout, stderr, exitCode } = await runAegis("claude", ["--version"]);
       const output = stdout + stderr;
 
-      console.log("aegis cc --version output:", output.trim());
-      console.log("aegis cc --version exitCode:", exitCode);
+      console.log("aegis claude --version output:", output.trim());
+      console.log("aegis claude --version exitCode:", exitCode);
 
       // STRICT: if direct CLI exits 0, aegis wrapper MUST also exit 0
       // The aegis wrapper should not degrade a working CLI
       expect(exitCode).toBe(0);
     });
 
-    test("aegis cc --version produces version output (not error)", async () => {
+    test("aegis claude --version produces version output (not error)", async () => {
       const claudeAvailable = await isCliAvailable("claude");
       if (!claudeAvailable) {
         throw new Error("Claude Code CLI not available - test cannot run");
       }
 
-      const { stdout, stderr, exitCode } = await runAegis("cc", ["--version"]);
+      const { stdout, stderr, exitCode } = await runAegis("claude", ["--version"]);
       const output = stdout + stderr;
 
       // Must exit 0
@@ -376,7 +382,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
       expect(output.toLowerCase()).toMatch(/claude|\d+\.\d+|version/i);
     });
 
-    test("aegis cc exit code matches direct claude exit code", async () => {
+    test("aegis claude exit code matches direct claude exit code", async () => {
       const claudeAvailable = await isCliAvailable("claude");
       if (!claudeAvailable) {
         throw new Error("Claude Code CLI not available - test cannot run");
@@ -386,7 +392,7 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
       const directResult = await runCliDirect("claude", ["--version"]);
 
       // Get aegis wrapper exit code
-      const aegisResult = await runAegis("cc", ["--version"]);
+      const aegisResult = await runAegis("claude", ["--version"]);
 
       // Exit codes should match
       expect(aegisResult.exitCode).toBe(directResult.exitCode);
@@ -395,8 +401,9 @@ describe("Layer 4: e2e smoke tests with real CLIs", () => {
 });
 
 describe("Layer 4: e2e error handling", () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     requireDocker("Layer 4 (e2e)");
+    await seedCatalogConfigForHome(TEST_HOME);
   });
 
   test("aegis with invalid tool shows error", async () => {
@@ -449,6 +456,7 @@ describe("Layer 4: e2e error handling", () => {
 describe("Layer 4: aegis-specific flags with real CLIs", () => {
   beforeAll(async () => {
     requireDocker("Layer 4 (e2e)");
+    await seedCatalogConfigForHome(TEST_HOME);
 
     // Re-check availability for this suite
     for (const cli of CLI_TOOLS) {

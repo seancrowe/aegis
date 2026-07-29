@@ -100,7 +100,7 @@ async function makeFixture(): Promise<Fixture> {
       `hideHomeAlways = false
 hide = []
 
-[tools.cc]
+[tools.claude]
 name = "Claude fixture"
 cliCmd = "claude"
 yoloArg = "--dangerously-skip-permissions"
@@ -157,7 +157,7 @@ async function runAegis(
     ? `${fixture.homeBin}:${process.env.PATH}`
     : `${FIXTURES_BIN_TOOLS}:${process.env.PATH}`;
   const proc = spawn({
-    cmd: ["bun", "run", AEGIS_PATH, "cc", ...aegisArgs],
+    cmd: ["bun", "run", AEGIS_PATH, "claude", ...aegisArgs],
     cwd: fixture.project,
     env: {
       ...process.env,

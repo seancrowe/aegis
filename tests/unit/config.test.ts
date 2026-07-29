@@ -32,8 +32,9 @@ describe("defaultConfig", () => {
     expect(config.allowRead).toEqual([]);
     expect(config.hide.length).toBeGreaterThan(0);
     expect(config.cwdOverrides).toEqual([]);
-    expect(config.tools).toEqual(defaultCliDefs());
-    expect(config.tools.length).toBe(6);
+    // A fresh config opts into nothing: tools arrive only via `aegis init` or
+    // `aegis tools add`.
+    expect(config.tools).toEqual([]);
   });
 
   test("returns a new object each time", () => {
@@ -45,7 +46,7 @@ describe("defaultConfig", () => {
 });
 
 describe("defaultConfigContent", () => {
-  test("is valid TOML that parses to defaultConfig(), including tools (no drift)", () => {
+  test("is valid TOML that parses to defaultConfig() (no drift)", () => {
     const result = parseConfig(defaultConfigContent());
     Result.assertOk(result);
     expect(result.value).toEqual(defaultConfig());
@@ -54,7 +55,15 @@ describe("defaultConfigContent", () => {
   test("contains explanatory comments", () => {
     expect(defaultConfigContent()).toContain("#");
     expect(defaultConfigContent()).toContain("extraWritable");
-    expect(defaultConfigContent()).toContain("[tools.cc]");
+  });
+
+  // The scaffold must stay tool-free, or `aegis tools add <name>` on a fresh
+  // install scaffolds the tool and then rejects it as already configured.
+  test("declares no tool tables", () => {
+    expect(defaultConfigContent()).not.toContain("[tools.");
+    for (const def of defaultCliDefs()) {
+      expect(defaultConfigContent()).not.toContain(`[tools.${def.subCommand}]`);
+    }
   });
 });
 
@@ -875,24 +884,24 @@ cliCmd = "test"
   test("rejects a duplicate after a comment containing a triple-quote fence", () => {
     const result = parseConfig(`${base}
 # see """ this
-[tools.cc]
+[tools.claude]
 name = "Claude Code"
-[tools.cc]
+[tools.claude]
 cliCmd = "claude"
 `);
     Result.assertError(result);
-    expect(result.error.message).toContain('Duplicate tool table "cc"');
+    expect(result.error.message).toContain('Duplicate tool table "claude"');
   });
 
   test("rejects a duplicate after a quoted display name containing a fence", () => {
     const result = parseConfig(`${base}
-[tools.cc]
+[tools.claude]
 name = "a''' b"
-[tools.cc]
+[tools.claude]
 cliCmd = "claude"
 `);
     Result.assertError(result);
-    expect(result.error.message).toContain('Duplicate tool table "cc"');
+    expect(result.error.message).toContain('Duplicate tool table "claude"');
   });
 
   test("a duplicate after a multi-line string is still caught", () => {
@@ -1145,36 +1154,18 @@ describe("loadConfig", () => {
     Result.assertError(result);
   });
 
-  test("fails loudly when only legacy config.json exists", async () => {
+  test("ignores a stale config.json and scaffolds the TOML default", async () => {
+    // A leftover JSON file is not a reason to refuse to start, and users of a
+    // compiled binary have no converter script to run.
     const configDir = join(tempDir, "aegis");
     await mkdir(configDir, { recursive: true });
     const legacyPath = join(configDir, "config.json");
     await writeFile(legacyPath, '{ hideHomeAlways: false, hide: [] }');
 
-    const result = await loadConfig();
-    Result.assertError(result);
-    expect(result.error.message).toContain(legacyPath);
-    expect(result.error.message).toContain("scripts/config-to-toml.ts");
-    // This error is the only instruction an existing install ever gets, and the
-    // script takes both paths as arguments — naming it without them sends the
-    // user to a usage error.
-    expect(result.error.message).toContain(
-      `bun run scripts/config-to-toml.ts "${legacyPath}" "${join(configDir, "config.toml")}"`
-    );
-    // The converter is not in the compiled binary (no scripts/ dir, and json5 is
-    // a devDependency), so the message must say where the command can be run at
-    // all — otherwise a binary-only install is handed an impossible instruction.
-    expect(result.error.message).toContain("source checkout");
-  });
-
-  test("does not scaffold a config over a legacy config.json", async () => {
-    // Writing the template here would silently discard the user's settings.
-    const configDir = join(tempDir, "aegis");
-    await mkdir(configDir, { recursive: true });
-    await writeFile(join(configDir, "config.json"), '{ hideHomeAlways: false, hide: [] }');
-
-    Result.assertError(await loadConfig());
-    expect(existsSync(join(configDir, "config.toml"))).toBe(false);
+    Result.assertOk(await loadConfig());
+    expect(existsSync(join(configDir, "config.toml"))).toBe(true);
+    // The JSON file is left where it was.
+    expect(existsSync(legacyPath)).toBe(true);
   });
 });
 
@@ -1304,7 +1295,7 @@ describe("config-to-toml migration script", () => {
         {
           name: "claude code",
           cliCmd: "claude",
-          subCommand: "cc",
+          subCommand: "claude",
           yoloArg: "--my-own-flag",
           rwPaths: [
             { kind: "dir", path: ".claude" },
@@ -1339,7 +1330,7 @@ describe("config-to-toml migration script", () => {
         {
           name: "claude code",
           cliCmd: "claude",
-          subCommand: "cc",
+          subCommand: "claude",
           yoloArg: "--my-own-flag",
           rwPaths: [
             { kind: "dir", path: ".claude" },

@@ -66,7 +66,7 @@ describe("dedupeFlag", () => {
 
 describe("normalizeToolArgs", () => {
   describe("claude code", () => {
-    const cli = findCli("cc");
+    const cli = findCli("claude");
 
     test("injects YOLO flag when not present", () => {
       const args = ["--version"];
@@ -276,9 +276,9 @@ describe("filterAegisFlags", () => {
 
 describe("getCliDef", () => {
   test("returns claude code CLI def", () => {
-    const cli = getCliDef("cc", defaults);
+    const cli = getCliDef("claude", defaults);
     expect(cli).toBeDefined();
-    expect(cli!.subCommand).toBe("cc");
+    expect(cli!.subCommand).toBe("claude");
     expect(cli!.cliCmd).toBe("claude");
     expect(cli!.yoloArg).toBe("--dangerously-skip-permissions");
     expect(cli!.rwPaths).toContainEqual({ kind: "dir", path: ".claude" });
@@ -338,7 +338,7 @@ describe("getCliDef", () => {
 
 describe("CLI defs", () => {
   test("claude code CLI def has correct structure", () => {
-    const cli = findCli("cc");
+    const cli = findCli("claude");
     expect(cli.name).toBe("claude code");
     expect(cli.cliCmd).toBe("claude");
     expect(cli.yoloArg).toBe("--dangerously-skip-permissions");

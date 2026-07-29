@@ -29,7 +29,7 @@ function makeOpts(overrides: Partial<SandboxOptions> = {}): SandboxOptions {
   return {
     cwd: "/Users/user/project",
     home: "/Users/user",
-    cliDef: findCli("cc"),
+    cliDef: findCli("claude"),
     toolPath: "/usr/local/bin/claude",
     toolChain: [],
     toolArgs: ["--version"],
@@ -461,10 +461,10 @@ describe("buildSandboxProfile — hide-home", () => {
   // it is that if the rwPath emit ever moves above the deny, this goes red and
   // the comment (and the README threat-model line) become detectably stale
   // rather than silently wrong.
-  test("re-exposes the cc Library/Keychains rwPath for read after the home deny", () => {
+  test("re-exposes the claude Library/Keychains rwPath for read after the home deny", () => {
     // Pin the platform: the rwPath is darwin-gated in the catalog, and this
     // assertion is about the SBPL builder, which runs the same everywhere.
-    const cliDef = defaultCliDefs("darwin").find((c) => c.subCommand === "cc")!;
+    const cliDef = defaultCliDefs("darwin").find((c) => c.subCommand === "claude")!;
     const p = buildSandboxProfile(makeOpts({ hideHome: true, cliDef }));
     const denyHome = lineWith(
       p,

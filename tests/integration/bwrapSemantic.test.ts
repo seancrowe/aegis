@@ -13,6 +13,7 @@ import { spawn } from "bun";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { requireDocker } from "../utils/dockerGuard";
+import { seedCatalogConfigForHome } from "../utils/catalogConfig";
 import {
   parseArgs,
   parseLsOutput,
@@ -58,7 +59,7 @@ async function runAegis(
   const newPath = `${FIXTURES_BIN_TOOLS}:${process.env.PATH}`;
 
   const proc = spawn({
-    cmd: ["bun", "run", AEGIS_PATH, "cc", ...aegisArgs],
+    cmd: ["bun", "run", AEGIS_PATH, "claude", ...aegisArgs],
     env: {
       ...process.env,
       ...env,
@@ -129,6 +130,10 @@ describe("bwrap semantic tests", () => {
   beforeAll(async () => {
     // Ensure this test only runs in Docker
     requireDocker("Layer 3 (bwrap semantic)");
+
+    // The first-run scaffold configures no tools, so `aegis claude` only has a
+    // subcommand to dispatch once the catalog is written into $HOME's config.
+    await seedCatalogConfigForHome(HOME_DIR);
 
     bwrapAvailable = await isBwrapAvailable();
     if (!bwrapAvailable) {
@@ -367,6 +372,10 @@ describe("bwrap semantic tests", () => {
       await mkdir(`${realHome}/.claude`, { recursive: true });
       await writeFile(`${realHome}/.claude/settings.json`, '{"version": 1}\n');
       await writeFile(`${realHome}/.claude.json`, "{}\n");
+      // These runs override $HOME, which moves the config lookup with it.
+      // Seeding the real home covers the linked spelling too — it resolves to
+      // the same directory.
+      await seedCatalogConfigForHome(realHome);
       await symlink(realHome, linkedHome, "dir");
     });
 
@@ -413,7 +422,7 @@ describe("bwrap semantic tests", () => {
     test("baseline: one-hop install runs without --hide-home", async () => {
       if (!bwrapAvailable) return;
 
-      const { stdout, exitCode } = await runAegisHomeInstalled("cc");
+      const { stdout, exitCode } = await runAegisHomeInstalled("claude");
       expect(exitCode).toBe(0);
       expect(parseHomeInstalledMarker(stdout)).toBe("claude");
     });
@@ -421,7 +430,7 @@ describe("bwrap semantic tests", () => {
     test("one-hop install still runs with --hide-home", async () => {
       if (!bwrapAvailable) return;
 
-      const { stdout, stderr, exitCode } = await runAegisHomeInstalled("cc", [
+      const { stdout, stderr, exitCode } = await runAegisHomeInstalled("claude", [
         "--hide-home",
       ]);
       expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });

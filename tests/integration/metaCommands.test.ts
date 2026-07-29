@@ -140,8 +140,22 @@ describe("meta commands", () => {
     const result = await runAegis(["tools", "list"], env);
 
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout).toContain("cc (claude) — claude code [not configured]");
-    expect(result.stdout).toContain(`Config: ${configPath}`);
+    expect(result.stdout).toContain(`No tools configured in ${configPath}.`);
+    // An empty list is a dead end without somewhere to go next.
+    expect(result.stdout).toContain("aegis tools presets");
+  });
+
+  test("tools presets marks an unconfigured preset with a zero-tool config", async () => {
+    await mkdir(configDir, { recursive: true });
+    await writeFile(configPath, configWithoutTools());
+
+    const result = await runAegis(["tools", "presets"], env);
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "claude (claude) — claude code [not configured]"
+    );
+    expect(result.stdout).toContain("aegis tools add");
   });
 
   test("tools schema succeeds with a zero-tool config", async () => {
@@ -154,17 +168,32 @@ describe("meta commands", () => {
     expect(result.stdout).toContain("Config schema (TOML)");
   });
 
-  test("tools list prints the catalog and parse error for broken config", async () => {
+  test("tools list reports the parse error rather than guessing at a tool set", async () => {
     await mkdir(configDir, { recursive: true });
     await writeFile(configPath, "hideHomeAlways = [\n");
 
     const result = await runAegis(["tools", "list"], env);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stdout).toContain("Tool catalog:");
-    expect(result.stdout).toContain("cc (claude)");
+    // Listing presets here would read as "these are your tools" when the config
+    // that decides that could not be read at all.
+    expect(result.stdout).not.toContain("claude");
     expect(result.stderr).toContain(configPath);
     expect(result.stderr).toMatch(/:\d+:\d+:/);
+  });
+
+  test("tools presets still prints for a broken config", async () => {
+    await mkdir(configDir, { recursive: true });
+    await writeFile(configPath, "hideHomeAlways = [\n");
+
+    const result = await runAegis(["tools", "presets"], env);
+
+    expect(result.exitCode).not.toBe(0);
+    // The presets are compiled in, so a broken config costs only the markers.
+    expect(result.stdout).toContain("Tool presets:");
+    expect(result.stdout).toContain("claude (claude)");
+    expect(result.stdout).not.toContain("[configured]");
+    expect(result.stderr).toContain(configPath);
   });
 
   test("tools add refuses an unparseable config without changing a byte", async () => {
@@ -189,7 +218,7 @@ describe("meta commands", () => {
     const second = await runAegis(["tools", "add", "claude"], env);
 
     expect(second.exitCode).not.toBe(0);
-    expect(second.stderr).toContain('Tool key "cc" is already configured');
+    expect(second.stderr).toContain('Tool key "claude" is already configured');
     expect(await readFile(configPath, "utf-8")).toBe(afterFirst);
   });
 
@@ -201,7 +230,7 @@ describe("meta commands", () => {
     const result = await runAegis(["tools", "add", "claude"], env);
 
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout).toContain("Added [tools.cc]");
+    expect(result.stdout).toContain("Added [tools.claude]");
     const appended = await readFile(configPath, "utf-8");
     expect(appended.startsWith(original)).toBe(true);
     expect(appended).toContain("# keep this comment");
@@ -213,7 +242,7 @@ describe("meta commands", () => {
       const loaded = await loadConfig();
       expect(loaded.ok).toBe(true);
       if (loaded.ok) {
-        expect(loaded.value.tools.map((tool) => tool.subCommand)).toContain("cc");
+        expect(loaded.value.tools.map((tool) => tool.subCommand)).toContain("claude");
       }
     } finally {
       if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -237,9 +266,9 @@ describe("meta commands", () => {
 
     expect(result.exitCode, result.stderr).toBe(0);
     const parsed = Bun.TOML.parse(await readFile(configPath, "utf-8")) as {
-      tools: { cc: { cliCmd: string } };
+      tools: { claude: { cliCmd: string } };
     };
-    expect(parsed.tools.cc.cliCmd).toBe(claudePath);
+    expect(parsed.tools.claude.cliCmd).toBe(claudePath);
   });
 
   test("tools add preserves a symlinked config and updates its target", async () => {
@@ -254,7 +283,7 @@ describe("meta commands", () => {
 
     expect(result.exitCode, result.stderr).toBe(0);
     expect((await lstat(configPath)).isSymbolicLink()).toBe(true);
-    expect(await readFile(targetPath, "utf-8")).toContain("[tools.cc]");
+    expect(await readFile(targetPath, "utf-8")).toContain("[tools.claude]");
   });
 
   test("tools add supports aliases and validates extra writable paths", async () => {
@@ -330,12 +359,12 @@ describe("meta commands", () => {
 
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain(claudePath);
-    expect(result.stdout).toContain("Added [tools.cc]");
+    expect(result.stdout).toContain("Added [tools.claude]");
     const parsed = Bun.TOML.parse(await readFile(configPath, "utf-8")) as {
-      tools: { cc: { cliCmd: string } };
+      tools: { claude: { cliCmd: string } };
     };
-    expect(parsed.tools.cc.cliCmd).toBe(claudePath);
-    expect(result.stdout).toContain(parsed.tools.cc.cliCmd);
+    expect(parsed.tools.claude.cliCmd).toBe(claudePath);
+    expect(result.stdout).toContain(parsed.tools.claude.cliCmd);
   });
 
   test("init duplicate detection uses the config reread after confirmation", async () => {
@@ -347,7 +376,7 @@ describe("meta commands", () => {
     process.env.HOME = home;
     const editedDuringPrompt =
       minimalConfig() +
-      '\n[tools.cc]\nname = "edited externally"\ncliCmd = "claude"\n';
+      '\n[tools.claude]\nname = "edited externally"\ncliCmd = "claude"\n';
 
     try {
       const result = await runInit({ all: true }, async () => {
@@ -371,14 +400,14 @@ describe("meta commands", () => {
     await writeFile(
       configPath,
       minimalConfig(
-        `[tools.cc]\nname = "claude code"\ncliCmd = ${JSON.stringify(stale)}\n`
+        `[tools.claude]\nname = "claude code"\ncliCmd = ${JSON.stringify(stale)}\n`
       )
     );
 
     const result = await runAegis(["tools", "list"], env);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain(`cc: cliCmd not found: ${stale}`);
+    expect(result.stdout).toContain(`${stale}  ✗ not found`);
   });
 
   test("init without flags and without a TTY reports proposals instead of hanging", async () => {
@@ -413,17 +442,17 @@ describe("meta commands", () => {
       configPath,
       "﻿" +
         minimalConfig() +
-        '\n[tools.cc]\nname = "claude code"\ncliCmd = "claude"\nrwDirs = [".claude"]\n'
+        '\n[tools.claude]\nname = "claude code"\ncliCmd = "claude"\nrwDirs = [".claude"]\n'
     );
 
-    const list = await runAegis(["tools", "list"], env);
+    const list = await runAegis(["tools", "presets"], env);
     expect(list.exitCode, list.stderr).toBe(0);
-    expect(list.stdout).toContain("cc (claude) — claude code [configured]");
+    expect(list.stdout).toContain("claude (claude) — claude code [configured]");
 
     const before = await readFile(configPath, "utf-8");
     const add = await runAegis(["tools", "add", "claude"], env);
     expect(add.exitCode).not.toBe(0);
-    expect(add.stderr).toContain('Tool key "cc" is already configured');
+    expect(add.stderr).toContain('Tool key "claude" is already configured');
     expect(await readFile(configPath, "utf-8")).toBe(before);
   });
 

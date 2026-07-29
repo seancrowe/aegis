@@ -26,10 +26,16 @@ import {
   type ToolRecipe,
 } from "./catalog";
 
+interface ConfiguredTool {
+  key: string;
+  name: string;
+  cliCmd: string;
+}
+
 interface ConfigDocument {
   content: string;
   configuredKeys: Set<string>;
-  configuredCliCmds: Map<string, string>;
+  configured: ConfiguredTool[];
 }
 
 interface PendingTool {
@@ -84,7 +90,7 @@ hide = ["~/.ssh", "~/.aws"]
 allowRead = ["~/.config/git"]
 extraWritable = ["~/.npm"]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 yoloArg = "--dangerously-skip-permissions"
@@ -146,9 +152,11 @@ async function readConfigDocument(): Promise<
     value: {
       content,
       configuredKeys: explicitToolKeys(content),
-      configuredCliCmds: new Map(
-        parsed.value.tools.map((tool) => [tool.subCommand, tool.cliCmd])
-      ),
+      configured: parsed.value.tools.map((tool) => ({
+        key: tool.subCommand,
+        name: tool.name,
+        cliCmd: tool.cliCmd,
+      })),
     },
   };
 }
@@ -307,8 +315,8 @@ function renderedHeader(tool: PendingTool): string {
   return renderPendingTool(tool).split("\n", 1)[0]!;
 }
 
-function printCatalog(configuredKeys?: Set<string>): void {
-  process.stdout.write("Tool catalog:\n");
+function printPresets(configuredKeys?: Set<string>): void {
+  process.stdout.write("Tool presets:\n");
   for (const recipe of TOOL_CATALOG) {
     const configured =
       configuredKeys === undefined
@@ -320,6 +328,57 @@ function printCatalog(configuredKeys?: Set<string>): void {
       `  ${recipe.subCommand} (${recipe.cliCmd}) — ${recipe.name}${configured}\n`
     );
   }
+}
+
+/**
+ * Print the tools this install can actually run.
+ *
+ * Deliberately says nothing about presets beyond a one-line pointer: "what can
+ * I type after `aegis`" and "what could I add" are different questions asked at
+ * different times, and mixing them buried the first one. Returns true when a
+ * configured cliCmd has gone stale so the caller can exit non-zero — a tool
+ * table naming a binary that is no longer there is a broken config, not a note.
+ */
+function printConfigured(document: ConfigDocument): boolean {
+  const configPath = getConfigPath();
+  if (document.configured.length === 0) {
+    process.stdout.write(`No tools configured in ${configPath}.\n`);
+    process.stdout.write(
+      "Run `aegis init` to add the agents found on your PATH, " +
+        "or `aegis tools presets` to see what aegis can configure.\n"
+    );
+    return false;
+  }
+
+  const presetKeys = new Set(TOOL_CATALOG.map((recipe) => recipe.subCommand));
+  const width = Math.max(...document.configured.map((tool) => tool.key.length));
+  process.stdout.write(`Configured tools (${configPath}):\n`);
+  let stale = false;
+  for (const tool of document.configured) {
+    // A relative cliCmd is resolved against PATH at spawn time, so its absence
+    // here is not something this command can honestly report on.
+    const missing = isAbsolute(tool.cliCmd) && !existsSync(tool.cliCmd);
+    if (missing) stale = true;
+    const note = missing
+      ? "  ✗ not found"
+      : presetKeys.has(tool.key)
+        ? ""
+        : "  (not a preset)";
+    process.stdout.write(
+      `  ${tool.key.padEnd(width)}  ${tool.cliCmd}${note}\n`
+    );
+  }
+
+  const unconfigured = TOOL_CATALOG.filter(
+    (recipe) => !document.configuredKeys.has(recipe.subCommand)
+  ).length;
+  if (unconfigured > 0) {
+    process.stdout.write(
+      `\n${unconfigured} preset${unconfigured === 1 ? "" : "s"} not configured` +
+        " — run `aegis tools presets`\n"
+    );
+  }
+  return stale;
 }
 
 function absoluteMatch(recipe: ToolRecipe): string | undefined {
@@ -435,43 +494,49 @@ export async function runMetaCommand(
 
   tools
     .command("list")
-    .description("Compare the tool catalog with the current config")
+    .description("Show the tools this install can run")
     .action(async () => {
       const documentResult = await readConfigDocument();
       if (!documentResult.ok) {
-        printCatalog();
+        // Without a parseable config there is no configured set to report, and
+        // guessing at one from the presets would be a lie. Say why, and point
+        // at the command that still works.
+        process.stderr.write(
+          `Could not read ${getConfigPath()}:\n${documentResult.error.message}\n` +
+            "Run `aegis tools presets` to see what aegis can configure.\n"
+        );
+        commandCode = 1;
+        return;
+      }
+      if (printConfigured(documentResult.value)) commandCode = 1;
+    });
+
+  tools
+    .command("presets")
+    .description("Show the tools aegis ships ready-made config for")
+    .action(async () => {
+      const documentResult = await readConfigDocument();
+      if (!documentResult.ok) {
+        // The presets are compiled in, so they are still worth printing; only
+        // the [configured] markers depend on a readable config.
+        printPresets();
         process.stderr.write(
           `Could not read ${getConfigPath()}:\n${documentResult.error.message}\n`
         );
         commandCode = 1;
         return;
       }
-      printCatalog(documentResult.value.configuredKeys);
-      let staleCliCmd = false;
-      for (const [key, cliCmd] of documentResult.value.configuredCliCmds) {
-        if (isAbsolute(cliCmd) && !existsSync(cliCmd)) {
-          process.stdout.write(`  ${key}: cliCmd not found: ${cliCmd}\n`);
-          staleCliCmd = true;
-        }
-      }
-      if (staleCliCmd) commandCode = 1;
-      const catalogKeys = new Set(
-        TOOL_CATALOG.map((recipe) => recipe.subCommand)
+      printPresets(documentResult.value.configuredKeys);
+      process.stdout.write(
+        "\nAdd one with `aegis tools add <name>`, " +
+          "or run `aegis init` to add every preset found on your PATH.\n"
       );
-      const custom = [...documentResult.value.configuredKeys].filter(
-        (key) => !catalogKeys.has(key)
-      );
-      if (custom.length > 0) {
-        process.stdout.write("Configured tools not in the catalog:\n");
-        for (const key of custom) process.stdout.write(`  ${key}\n`);
-      }
-      process.stdout.write(`Config: ${getConfigPath()}\n`);
     });
 
   tools
     .command("add")
-    .description("Append catalog tool tables to config.toml")
-    .argument("<names...>", "catalog subcommands or executable names")
+    .description("Append preset tool tables to config.toml")
+    .argument("<names...>", "preset names or executable names")
     .option("--as <name>", "override the tool table key")
     .option(
       "--rw-path <path>",

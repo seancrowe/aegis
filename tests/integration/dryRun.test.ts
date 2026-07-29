@@ -8,6 +8,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+import { seedCatalogConfigForHome } from "../utils/catalogConfig";
 
 // These tests assert the bwrap argv shape, so they only run on Linux.
 // The sandbox-exec (macOS) dry-run path is covered by sandboxExecDryRun.test.ts.
@@ -15,7 +16,7 @@ const describe = process.platform === "linux" ? _describe : _describe.skip;
 
 const AEGIS_PATH = resolve(__dirname, "../../src/main.ts");
 const CLAUDE_TOOL_TOML = `
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 yoloArg = "--dangerously-skip-permissions"
@@ -156,6 +157,9 @@ describe("dry-run basic functionality", () => {
     // Create tool config dirs that would normally exist
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
     await mkdir(join(tempHome, ".codex"), { recursive: true });
     await mkdir(join(tempHome, ".gemini"), { recursive: true });
   });
@@ -166,7 +170,7 @@ describe("dry-run basic functionality", () => {
 
   test("outputs JSON with cmd and args for claude", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -214,7 +218,7 @@ describe("dry-run basic functionality", () => {
   test("rejects every unsafe CLI -w spelling before expansion", async () => {
     for (const path of REJECTED_WRITABLE_PATHS) {
       const { output, stderr, exitCode } = await runAegisDryRun(
-        "cc",
+        "claude",
         ["--version"],
         ["-w", path],
         { HOME: tempHome },
@@ -230,7 +234,7 @@ describe("dry-run basic functionality", () => {
   test("accepts every safe CLI -w spelling", async () => {
     for (const path of ACCEPTED_WRITABLE_PATHS) {
       const { output, exitCode } = await runAegisDryRun(
-        "cc",
+        "claude",
         ["--version"],
         ["-w", path],
         { HOME: tempHome },
@@ -255,6 +259,9 @@ describe("dry-run YOLO flag normalization", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -263,7 +270,7 @@ describe("dry-run YOLO flag normalization", () => {
 
   test("injects claude YOLO flag in args", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -276,7 +283,7 @@ describe("dry-run YOLO flag normalization", () => {
 
   test("dedupes claude YOLO flag if provided", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--dangerously-skip-permissions", "--version"],
       [],
       { HOME: tempHome },
@@ -334,6 +341,9 @@ describe("dry-run aegis flags not forwarded", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -342,7 +352,7 @@ describe("dry-run aegis flags not forwarded", () => {
 
   test("--hide-home flag is not passed to tool", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide-home"],
       { HOME: tempHome },
@@ -356,7 +366,7 @@ describe("dry-run aegis flags not forwarded", () => {
 
   test("--hide flag is not passed to tool", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide],
       { HOME: tempHome },
@@ -370,7 +380,7 @@ describe("dry-run aegis flags not forwarded", () => {
 
   test("--dry-run flag is not passed to tool", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -395,6 +405,9 @@ describe("dry-run bwrap base flags", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -403,7 +416,7 @@ describe("dry-run bwrap base flags", () => {
 
   test("includes base bwrap flags", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -421,7 +434,7 @@ describe("dry-run bwrap base flags", () => {
 
   test("includes cwd bind", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -451,6 +464,9 @@ describe("dry-run non-hideHome bind and ro-binds", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
     // Add extra dotfiles to verify ro-bind
     await writeFile(join(tempHome, ".bashrc"), "# bashrc");
     await mkdir(join(tempHome, ".config"), { recursive: true });
@@ -462,7 +478,7 @@ describe("dry-run non-hideHome bind and ro-binds", () => {
 
   test("non-hideHome includes --bind for HOME", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -483,7 +499,7 @@ describe("dry-run non-hideHome bind and ro-binds", () => {
 
   test("non-hideHome includes ro-bind for home entries", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -511,7 +527,7 @@ describe("dry-run non-hideHome bind and ro-binds", () => {
 
   test("non-hideHome: dir rwPaths are ro-bound then overridden; file rwPaths are neither", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -567,6 +583,9 @@ describe("dry-run --hide-home mode", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -575,7 +594,7 @@ describe("dry-run --hide-home mode", () => {
 
   test("--hide-home includes tmpfs for HOME", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide-home"],
       { HOME: tempHome },
@@ -600,7 +619,7 @@ describe("dry-run --hide-home mode", () => {
 
   test("--hide-home still has tool config binds", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide-home"],
       { HOME: tempHome },
@@ -634,6 +653,9 @@ describe("dry-run --hide paths", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -642,7 +664,7 @@ describe("dry-run --hide paths", () => {
 
   test("--hide creates overlay for hidden path", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide1],
       { HOME: tempHome },
@@ -661,7 +683,7 @@ describe("dry-run --hide paths", () => {
     await mkdir(absoluteHide);
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", relativeHide],
       { HOME: tempHome },
@@ -678,7 +700,7 @@ describe("dry-run --hide paths", () => {
     await mkdir(ssh);
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", "~/.ssh"],
       { HOME: tempHome },
@@ -692,7 +714,7 @@ describe("dry-run --hide paths", () => {
 
   test("rejects home/root --hide spelling before filesystem probing", async () => {
     const { output, stderr, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", "~/../.."],
       { HOME: tempHome },
@@ -709,7 +731,7 @@ describe("dry-run --hide paths", () => {
 
   test("multiple --hide flags create multiple overlays", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide1, "--hide", tempHide2],
       { HOME: tempHome },
@@ -736,6 +758,9 @@ describe("dry-run error cases", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -758,7 +783,7 @@ describe("dry-run error cases", () => {
   test("fails with non-existent hide path", async () => {
     const nonExistent = join(tempDir, "does-not-exist");
     const { output, stderr, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       [],
       ["--hide", nonExistent],
       { HOME: tempHome },
@@ -775,7 +800,7 @@ describe("dry-run error cases", () => {
     await writeFile(filePath, "content");
 
     const { output, stderr, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       [],
       ["--hide", filePath],
       { HOME: tempHome },
@@ -806,6 +831,9 @@ describe("dry-run config integration", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -822,7 +850,7 @@ describe("dry-run config integration", () => {
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -859,7 +887,7 @@ ${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -889,7 +917,7 @@ ${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", cliHide],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -912,7 +940,7 @@ ${CLAUDE_TOOL_TOML}`
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -944,6 +972,9 @@ describe("dry-run MUST NOT execute bwrap", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    // The first-run scaffold configures no tools, so opt the catalog in
+    // before `aegis <tool>` has a subcommand to dispatch.
+    await seedCatalogConfigForHome(tempHome);
   });
 
   afterEach(async () => {
@@ -959,7 +990,7 @@ describe("dry-run MUST NOT execute bwrap", () => {
         "bun",
         "run",
         AEGIS_PATH,
-        "cc",
+        "claude",
         "--dry-run",
         "--version",
       ],
@@ -1001,7 +1032,7 @@ describe("dry-run MUST NOT execute bwrap", () => {
         "bun",
         "run",
         AEGIS_PATH,
-        "cc",
+        "claude",
         "--dry-run",
         "--hide-home",
         "--version",
@@ -1036,7 +1067,7 @@ describe("dry-run MUST NOT execute bwrap", () => {
         "bun",
         "run",
         AEGIS_PATH,
-        "cc",
+        "claude",
         "--dry-run",
         "--hide",
         tempHide,

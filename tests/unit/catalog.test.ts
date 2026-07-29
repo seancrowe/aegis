@@ -8,7 +8,7 @@ import {
 } from "../../src/tools/catalog";
 
 const claudeRecipe = TOOL_CATALOG.find(
-  (recipe) => recipe.subCommand === "cc"
+  (recipe) => recipe.subCommand === "claude"
 )!;
 
 describe("tool catalog", () => {
@@ -16,7 +16,7 @@ describe("tool catalog", () => {
     // Without write access the OAuth refresh cannot persist its rotated token,
     // which surfaces hours later as a spurious logout in unsandboxed sessions.
     const claude = defaultCliDefs("darwin").find(
-      (cli) => cli.subCommand === "cc"
+      (cli) => cli.subCommand === "claude"
     )!;
     expect(claude.rwPaths).toContainEqual({
       kind: "dir",
@@ -32,7 +32,7 @@ describe("tool catalog", () => {
     // would have ensureHostPathsExist create an empty one.
     for (const platform of ["linux", "win32"] as const) {
       const claude = defaultCliDefs(platform).find(
-        (cli) => cli.subCommand === "cc"
+        (cli) => cli.subCommand === "claude"
       )!;
       expect(claude.rwPaths.map((rwPath) => rwPath.path)).toEqual([
         ".claude",
@@ -52,7 +52,7 @@ describe("renderToolTable", () => {
       tools: Record<string, Record<string, unknown>>;
     };
 
-    expect(parsed.tools.cc).toEqual({
+    expect(parsed.tools.claude).toEqual({
       name: "claude code",
       cliCmd: "claude",
       yoloArg: "--dangerously-skip-permissions",

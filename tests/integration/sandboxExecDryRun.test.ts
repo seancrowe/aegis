@@ -9,6 +9,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+import { seedCatalogConfigForHome } from "../utils/catalogConfig";
 
 const describe = process.platform === "darwin" ? _describe : _describe.skip;
 
@@ -104,6 +105,7 @@ describe("sandbox-exec dry-run", () => {
     await mkdir(tempProject, { recursive: true });
     await mkdir(join(tempHome, ".claude"), { recursive: true });
     await writeFile(join(tempHome, ".claude.json"), "{}");
+    await seedCatalogConfigForHome(tempHome);
     realProject = realpathSync(tempProject);
   });
 
@@ -113,7 +115,7 @@ describe("sandbox-exec dry-run", () => {
 
   test("emits a sandbox-exec command with -p and a profile", async () => {
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -129,7 +131,7 @@ describe("sandbox-exec dry-run", () => {
   test("rejects every unsafe CLI -w spelling before expansion", async () => {
     for (const path of REJECTED_WRITABLE_PATHS) {
       const { output, stderr, exitCode } = await runAegisDryRun(
-        "cc",
+        "claude",
         ["--version"],
         ["-w", path],
         { HOME: tempHome },
@@ -145,7 +147,7 @@ describe("sandbox-exec dry-run", () => {
   test("accepts every safe CLI -w spelling", async () => {
     for (const path of ACCEPTED_WRITABLE_PATHS) {
       const { output, exitCode } = await runAegisDryRun(
-        "cc",
+        "claude",
         ["--version"],
         ["-w", path],
         { HOME: tempHome },
@@ -241,7 +243,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
 
   test("profile is read-only root with the cwd writable", async () => {
     const { output } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -257,7 +259,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
 
   test("keeps /tmp and $TMPDIR writable", async () => {
     const { output } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -279,7 +281,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
     const secret = join(tempHome, ".ssh");
     await mkdir(secret, { recursive: true });
     const { output } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", secret],
       { HOME: tempHome },
@@ -295,7 +297,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
     await mkdir(join(tempProject, relativeHide));
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", relativeHide],
       { HOME: tempHome },
@@ -316,7 +318,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
     await mkdir(ssh);
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", "~/.ssh"],
       { HOME: tempHome },
@@ -331,7 +333,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
 
   test("rejects home/root --hide spelling before filesystem probing", async () => {
     const { output, stderr, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", "~/../.."],
       { HOME: tempHome },
@@ -349,7 +351,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
   test("missing CLI --hide remains a hard error", async () => {
     const missing = join(tempProject, "missing-hide");
     const { exitCode, stderr } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", "missing-hide"],
       { HOME: tempHome },
@@ -375,7 +377,7 @@ cliCmd = ${JSON.stringify(cliCmd)}
 homeAccess = "allowlist"
 hide = []
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 rwDirs = [".claude"]
@@ -384,7 +386,7 @@ hide = [${JSON.stringify(outsideHide)}]
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome, XDG_CONFIG_HOME: configHome },
@@ -419,7 +421,7 @@ hide = [${JSON.stringify(outsideHide)}]
 hide = [${JSON.stringify(globalHide)}]
 extraWritable = ["~/global-cache"]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 rwDirs = [".claude"]
@@ -429,7 +431,7 @@ extraWritable = ["~/tool-cache"]
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome, XDG_CONFIG_HOME: configHome },
@@ -539,7 +541,7 @@ rwDirs = [".omitted"]
       `hideHomeAlways = false
 hide = [${JSON.stringify(missingGlobal)}]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 rwDirs = [".claude"]
@@ -548,7 +550,7 @@ hide = [${JSON.stringify(missingTool)}]
     );
     const env = { HOME: tempHome, XDG_CONFIG_HOME: configHome };
     const strict = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       env,
@@ -556,7 +558,7 @@ hide = [${JSON.stringify(missingTool)}]
     );
     expect(strict.exitCode).toBe(1);
     expect(strict.stderr).toContain(configPath);
-    expect(strict.stderr).toContain('tool "cc"');
+    expect(strict.stderr).toContain('tool "claude"');
     expect(strict.stderr).toContain(missingTool);
 
     await writeFile(
@@ -564,14 +566,14 @@ hide = [${JSON.stringify(missingTool)}]
       `hideHomeAlways = false
 hide = [${JSON.stringify(missingGlobal)}]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 rwDirs = [".claude"]
 `
     );
     const lenient = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       env,
@@ -595,7 +597,7 @@ homeAccess = "allowlist"
 hide = [${JSON.stringify(legacyHide)}]
 allowRead = ["~/Library/Fonts"]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 rwDirs = [".claude"]
@@ -604,7 +606,7 @@ rwFiles = [".claude.json"]
     );
 
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       {
@@ -640,7 +642,7 @@ rwFiles = [".claude.json"]
       'overrides = [{ target = ".env", override = ".env.sandbox" }]\n'
     );
     const { exitCode, stderr } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },
@@ -658,7 +660,7 @@ rwFiles = [".claude.json"]
       'overrides = ["secrets/"]\n'
     );
     const { output, exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       [],
       { HOME: tempHome },

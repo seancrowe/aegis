@@ -23,7 +23,7 @@ function configToml(hideHomeAlways: boolean, hide: string[]): string {
   return `hideHomeAlways = ${hideHomeAlways}
 hide = [${hide.map((path) => JSON.stringify(path)).join(", ")}]
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 yoloArg = "--dangerously-skip-permissions"
@@ -120,7 +120,7 @@ describe("config persistence - CLI flags should not modify config.toml", () => {
 
     // Run aegis with --hide flag
     const { exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -146,7 +146,7 @@ describe("config persistence - CLI flags should not modify config.toml", () => {
 
     // Run aegis with --hide-home flag
     const { exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide-home"],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -174,7 +174,7 @@ describe("config persistence - CLI flags should not modify config.toml", () => {
 
     // Run aegis with multiple --hide flags
     const { exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide, "--hide", tempHide2],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -203,7 +203,7 @@ describe("config persistence - CLI flags should not modify config.toml", () => {
 
     // Run aegis with a new --hide flag
     const { exitCode } = await runAegisDryRun(
-      "cc",
+      "claude",
       ["--version"],
       ["--hide", tempHide],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
@@ -226,19 +226,20 @@ describe("config persistence - CLI flags should not modify config.toml", () => {
     await rm(configPath);
 
     // Run aegis with --hide flag
-    const { exitCode } = await runAegisDryRun(
-      "cc",
+    const { stderr, exitCode } = await runAegisDryRun(
+      "claude",
       ["--version"],
       ["--hide", tempHide],
       { HOME: tempHome, XDG_CONFIG_HOME: tempConfig },
       tempProject
     );
 
-    // Per plan.md: "If config file missing: create directories + write default config."
-    // The command should succeed
-    expect(exitCode).toBe(0);
+    // The auto-created config declares no tools, so the run is refused with
+    // guidance rather than sandboxing an un-opted-in tool.
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("No tools configured");
 
-    // Config file should be created (per plan.md spec). Comments are native
+    // Config file is still created (per plan.md spec). Comments are native
     // TOML, so the same parser used by aegis can inspect it.
     const afterConfigContent = await readFile(configPath, "utf-8");
     const afterConfig = parseConfigToml(afterConfigContent);

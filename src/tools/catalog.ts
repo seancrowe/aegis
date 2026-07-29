@@ -26,7 +26,7 @@ export const TOOL_CATALOG: ToolRecipe[] = [
   {
     name: "claude code",
     cliCmd: "claude",
-    subCommand: "cc",
+    subCommand: "claude",
     yoloArg: "--dangerously-skip-permissions",
     rwPaths: [
       { kind: "dir", path: ".claude" },

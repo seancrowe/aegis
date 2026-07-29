@@ -37,7 +37,7 @@ aegis is a **filesystem confinement** tool. Being explicit about what that does 
 - **Anything the agent can legitimately write.** Code in your cwd and the selected tool's config paths are read-write by design; an agent can still write a malicious script there. Global and per-tool `extraWritable` settings widen that surface.
 - **Supply-chain execution.** Commands the agent runs (package installs, build scripts) execute with the same sandbox permissions the agent has.
 - **Resource exhaustion.** No CPU, memory, or disk quotas are applied.
-- **Tool config paths, even under a hidden `$HOME`.** A tool's writable paths are re-allowed after the home deny and carry read as well as write. Concretely: on macOS, `--hide-home` does **not** hide `~/Library/Keychains` from `cc` — the login keychain stays readable and writable, because the CLI must read and rotate the OAuth token it stores there. Hiding it would break token refresh, so this is a deliberate trade, not an oversight.
+- **Tool config paths, even under a hidden `$HOME`.** A tool's writable paths are re-allowed after the home deny and carry read as well as write. Concretely: on macOS, `--hide-home` does **not** hide `~/Library/Keychains` from `claude` — the login keychain stays readable and writable, because the CLI must read and rotate the OAuth token it stores there. Hiding it would break token refresh, so this is a deliberate trade, not an oversight.
 - On macOS specifically, `/tmp` and the per-user `$TMPDIR` are writable host directories that persist across runs, and there is no process isolation — see [macOS notes](#macos-notes).
 
 If you need network egress control or full process isolation, a VM or a container with an explicit network policy is the right tool; aegis deliberately trades that isolation for near-zero startup cost and direct access to your real working directory.
@@ -99,26 +99,27 @@ bun install
 aegis <tool> [flags] [tool-args...]
 ```
 
-### Tool catalog
+### Tool presets
 
 | Tool | Default config key | YOLO flag (auto-injected) |
 |------|--------------------|--------------------------|
-| Claude Code | `cc` | `--dangerously-skip-permissions` |
+| Claude Code | `claude` | `--dangerously-skip-permissions` |
 | Codex | `codex` | `--dangerously-bypass-approvals-and-sandbox` |
 | Gemini CLI | `gemini` | `--yolo` |
 | Crush | `crush` | `--yolo` |
 | Auggie | `auggie` | *(none)* |
 | OpenCode | `opencode` | *(none)* |
 
-These are scaffolding recipes, not built-in tools. Only `[tools.<name>]` tables
-present in your config become commands.
+These are ready-made config blocks, not built-in tools. Only `[tools.<name>]`
+tables present in your config become commands.
 
 ### Setup commands
 
 | Command | Description |
 |---------|-------------|
-| `aegis tools list` | Show catalog recipes and whether each default key is configured |
-| `aegis tools add <name>...` | Append one or more catalog recipes, such as `aegis tools add claude` |
+| `aegis tools list` | Show the tools this install can run, with their resolved executables |
+| `aegis tools presets` | Show the tools aegis ships ready-made config for, and whether each is configured |
+| `aegis tools add <name>...` | Append one or more presets, such as `aegis tools add claude` |
 | `aegis tools schema` | Print the TOML config schema and a worked example |
 | `aegis init [--all] [--yes]` | Detect installed agents and offer to add them; `--all` includes agents not found on `PATH`, and `--yes` accepts without prompting |
 
@@ -137,10 +138,10 @@ Aegis flags are consumed by aegis and **not** forwarded to the wrapped tool. Eve
 
 ```bash
 # Run Claude in a sandbox
-aegis cc "explain this codebase"
+aegis claude "explain this codebase"
 
 # Hide your home directory (SSH keys, AWS creds, etc.)
-aegis cc --hide-home "write a test for main.ts"
+aegis claude --hide-home "write a test for main.ts"
 
 # Hide specific directories
 aegis gemini --hide ~/.ssh --hide ~/.aws "refactor the auth module"
@@ -152,14 +153,14 @@ aegis codex -w ~/.cargo/registry --writable ~/Library/Caches/go-build "build it"
 aegis codex --dry-run --hide-home
 
 # Tool flags are passed through as-is
-aegis cc --hide-home --version
+aegis claude --hide-home --version
 ```
 
 ## Configuration
 
 Config is stored at `$XDG_CONFIG_HOME/aegis/config.toml` (defaults to `~/.config/aegis/config.toml`) and parsed as TOML. Per-project overrides are stored in `.aegis.toml` under the `overrides` key. On first run aegis writes a commented template you can edit in place.
 
-There are **no built-in tools**. A fresh install gets six configured tools only because the generated template contains six `[tools.<name>]` tables. Deleting a table removes that command; no `tools` table or an empty `[tools]` table means no tools. Use `aegis init` or `aegis tools add <name>` to populate an empty tool set.
+There are **no built-in tools**, and the generated template declares none — a fresh install sandboxes nothing until you opt a tool in with `aegis init` (detects installed agents) or `aegis tools add <name>`. Each tool is one `[tools.<name>]` table; deleting a table removes that command, and no `tools` table or an empty `[tools]` table means no tools.
 
 This illustrative config shows the main global settings and one tool with
 optional per-tool policy:
@@ -188,7 +189,7 @@ allowRead = []
 # Empty by default — see the toolchain cache list below.
 extraWritable = []
 
-[tools.cc]
+[tools.claude]
 name = "claude code"
 cliCmd = "claude"
 yoloArg = "--dangerously-skip-permissions"

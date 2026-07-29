@@ -8,11 +8,6 @@ import { join, dirname, normalize } from "node:path";
 import { homedir } from "node:os";
 import type { CliDef, RwPath } from "../types";
 import { assertDirectory } from "../fs/paths";
-import {
-  TOOL_CATALOG,
-  renderToolTable,
-  toCliDef,
-} from "../tools/catalog";
 import type { OverrideEntry } from "./overrides";
 import { validateOverrideEntries } from "./overrides";
 import { isTable, parseToml, stripBom } from "./toml";
@@ -98,22 +93,20 @@ export function defaultConfig(): AegisConfig {
     allowRead: [],
     extraWritable: [],
     cwdOverrides: [],
-    // A newly scaffolded file contains all six catalog tables, so this
-    // in-memory return must describe those bytes exactly; it is not a runtime
-    // fallback for existing configs that omit tools.
-    tools: TOOL_CATALOG.map((recipe) => toCliDef(recipe)),
+    // A newly scaffolded file declares no [tools.*] tables, so this in-memory
+    // return must describe those bytes exactly. Tools arrive only via
+    // `aegis init` or `aegis tools add`; scaffolding them would make
+    // `tools add <name>` fail as already-configured on a fresh install.
+    tools: [],
   };
 }
 
 /**
- * The commented TOML template written when no config exists yet. Tool tables
- * come from the same emitter used by migration and future scaffolding, so a
- * catalog edit cannot leave any of those representations stale.
+ * The commented TOML template written when no config exists yet. It carries
+ * policy defaults only — no tool tables — so a fresh config is inert until the
+ * user opts a tool in.
  */
 export function defaultConfigContent(): string {
-  const tools = TOOL_CATALOG.map((recipe) =>
-    renderToolTable(recipe)
-  ).join("\n");
   return `# aegis config — TOML.
 # CLI flags are merged at runtime but never written back here.
 
@@ -153,8 +146,7 @@ extraWritable = [
   # "~/.gradle/caches",                      # Gradle (gradle.properties holds signing keys)
   # "~/.m2/repository",                      # Maven (settings.xml holds repo passwords)
 ]
-
-${tools}`;
+`;
 }
 
 const TOP_LEVEL_KEYS = new Set([
@@ -654,25 +646,9 @@ export async function loadConfig(): Promise<Result<AegisConfig, Error>> {
   const configPath = getConfigPath();
 
   if (!existsSync(configPath)) {
-    const legacyPath = join(dirname(configPath), "config.json");
-    if (existsSync(legacyPath)) {
-      // Refuse rather than scaffold a fresh config: writing the template here
-      // would silently drop whatever the user had added (extraWritable entries
-      // especially) with no signal that it happened. The command has to be
-      // copy-pasteable — this error is the only instruction an existing
-      // install ever gets.
-      return Result.error(
-        new Error(
-          `aegis: found a legacy JSON config and no ${configPath}.\n\n` +
-            `  ${legacyPath}\n\n` +
-            `aegis now reads TOML. Convert it, review the result, then move it into place:\n\n` +
-            `  bun run scripts/config-to-toml.ts "${legacyPath}" "${configPath}"\n\n` +
-            `That converter ships with the aegis source, not the compiled binary — ` +
-            `run it from a source checkout of aegis.\n` +
-            `Nothing is written until you run that; the JSON file is left untouched.`
-        )
-      );
-    }
+    // A leftover config.json is ignored outright: aegis has only ever read TOML
+    // for released users, and a stale JSON file is not a reason to refuse to
+    // start. It is left on disk untouched.
     const dir = dirname(configPath);
     await mkdir(dir, { recursive: true });
     const defaultCfg = defaultConfig();

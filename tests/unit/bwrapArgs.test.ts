@@ -23,7 +23,7 @@ function makeOpts(overrides: Partial<BwrapOptions> = {}): BwrapOptions {
   return {
     cwd: "/home/user/project",
     home: "/home/user",
-    cliDef: findCli("cc"),
+    cliDef: findCli("claude"),
     toolPath: "/usr/bin/claude",
     toolChain: [],
     toolArgs: ["--version"],
@@ -239,7 +239,7 @@ describe("buildBwrapArgs", () => {
   describe("tool config/auth paths (no hide-home)", () => {
     test("includes RW bind for claude dir but not file rwPaths", () => {
       const opts = makeOpts({
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
         home: "/home/user",
       });
       const result = buildBwrapArgs(opts);
@@ -412,7 +412,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
       });
       const result = buildBwrapArgs(opts);
       Result.assertOk(result);
@@ -446,7 +446,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
       });
       const result = buildBwrapArgs(opts);
       Result.assertOk(result);
@@ -470,7 +470,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
       });
       const result = buildBwrapArgs(opts);
       Result.assertOk(result);
@@ -498,7 +498,7 @@ describe("buildBwrapArgs", () => {
     });
 
     test("all dir mountpoints have --dir before --bind under hide-home (claude)", () => {
-      const claude = findCli("cc");
+      const claude = findCli("claude");
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
@@ -520,7 +520,7 @@ describe("buildBwrapArgs", () => {
     });
 
     test("all file mountpoints have --ro-bind /dev/null before --bind under hide-home (claude)", () => {
-      const claude = findCli("cc");
+      const claude = findCli("claude");
       const opts = makeOpts({
         hideHome: true,
         home: "/home/user",
@@ -745,7 +745,7 @@ describe("buildBwrapArgs", () => {
       const result = buildBwrapArgs(makeOpts({
         hideHome: false,
         homeEntries: [".claude", ".claude.json"],
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
       }));
       Result.assertOk(result);
       const args = result.value;
@@ -874,7 +874,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         cwd: "/home/user/project",
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
         hidePaths: ["/home/user/project/secrets", "/home/user/.claude/secrets"],
       });
       const result = buildBwrapArgs(opts);
@@ -915,7 +915,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         cwd: "/home/user/project",
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
         hidePaths: ["/home/user/.claude/internal-cache"],
       });
       const result = buildBwrapArgs(opts);
@@ -951,7 +951,7 @@ describe("buildBwrapArgs", () => {
       const opts = makeOpts({
         cwd: "/home/user/project",
         home: "/home/user",
-        cliDef: findCli("cc"),
+        cliDef: findCli("claude"),
         hidePaths: [
           "/home/user/project/secrets",
           "/home/user/project/.env",
