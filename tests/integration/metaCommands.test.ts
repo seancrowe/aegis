@@ -86,6 +86,7 @@ describe("meta commands", () => {
     expect(result.stdout).toContain("Worked example:");
     expect(result.stdout).toContain("ADD to their global lists");
     expect(result.stdout).toContain("including per-tool hide");
+    expect(result.stdout).toContain('[projects."');
     expect(await Bun.file(configPath).exists()).toBe(false);
   });
 

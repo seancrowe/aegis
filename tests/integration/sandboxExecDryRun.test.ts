@@ -4,7 +4,7 @@
  * command + generated SBPL profile. Skipped on non-darwin platforms.
  */
 import { describe as _describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmod, mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -126,6 +126,71 @@ describe("sandbox-exec dry-run", () => {
     expect(output?.args[0]).toBe("-p");
     expect(output?.args).toContain("--");
     expect(profileOf(output)).toContain("(version 1)");
+  });
+
+  test("rejects a hide covering the working directory", async () => {
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      ["--hide", "."],
+      {
+        HOME: tempHome,
+        XDG_CONFIG_HOME: join(tempHome, ".config"),
+      },
+      tempProject
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output).toBeNull();
+    expect(stderr).toContain("covers the working directory");
+  });
+
+  test("rejects a configured hide covering a tool config path", async () => {
+    await writeFile(
+      join(tempHome, ".config", "aegis", "config.toml"),
+      `hideHomeAlways = false
+hide = []
+
+[tools.claude]
+name = "claude code"
+cliCmd = "claude"
+rwDirs = [".claude"]
+hide = ["~/.claude"]
+`
+    );
+
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      [],
+      {
+        HOME: tempHome,
+        XDG_CONFIG_HOME: join(tempHome, ".config"),
+      },
+      tempProject
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output).toBeNull();
+    expect(stderr).toContain("covers tool config path");
+  });
+
+  test("warns when a writable grant is shadowed without polluting stdout", async () => {
+    await mkdir(join(tempHome, ".ssh"));
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      ["-w", join(tempHome, ".ssh")],
+      {
+        HOME: tempHome,
+        XDG_CONFIG_HOME: join(tempHome, ".config"),
+      },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain("and has no effect");
+    expect(output).not.toBeNull();
   });
 
   test("rejects every unsafe CLI -w spelling before expansion", async () => {
@@ -669,6 +734,304 @@ rwFiles = [".claude.json"]
     expect(exitCode).toBe(0);
     expect(profileOf(output)).toContain(
       `(deny file-read* file-write* (subpath "${join(realProject, "secrets")}"))`
+    );
+  });
+});
+
+describe("project policy", () => {
+  let tempDir: string;
+  let tempHome: string;
+  let configPath: string;
+  let proj: string;
+  let sub: string;
+  let other: string;
+  let cache: string;
+  let secret: string;
+  let childEnv: Record<string, string>;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "aegis-project-policy-"));
+    tempHome = join(tempDir, "home");
+    proj = join(tempHome, "proj");
+    sub = join(proj, "sub");
+    other = join(tempHome, "other");
+    cache = join(tempHome, "cache");
+    secret = join(tempHome, "secret");
+    await mkdir(join(tempHome, ".claude"), { recursive: true });
+    await writeFile(join(tempHome, ".claude.json"), "{}");
+    for (const path of [sub, other, cache, secret]) {
+      await mkdir(path, { recursive: true });
+    }
+    configPath = await seedCatalogConfigForHome(tempHome);
+    childEnv = {
+      HOME: tempHome,
+      XDG_CONFIG_HOME: join(tempHome, ".config"),
+    };
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  async function appendProjectConfig(config: string): Promise<void> {
+    await appendFile(configPath, `\n${config}`);
+  }
+
+  test("reports when no project blocks are configured", async () => {
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      proj
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain("project policy: none configured");
+  });
+
+  test("reports when no project block matches", async () => {
+    await appendProjectConfig(`[projects."~/proj"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      other
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain("no [projects.*] block matches");
+  });
+
+  test("reports the matching project block", async () => {
+    await appendProjectConfig(`[projects."~/proj"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      sub
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain('matched [projects."~/proj"]');
+  });
+
+  test("reports nested matching project blocks outermost first", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+
+[projects."~/proj/sub"]
+`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      sub
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain(
+      'matched [projects."~/proj"], [projects."~/proj/sub"]'
+    );
+  });
+
+  test("reports project blocks whose directories do not exist", async () => {
+    await appendProjectConfig(`[projects."~/does-not-exist"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      other
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain(
+      '"~/does-not-exist" does not exist on disk and never matches'
+    );
+  });
+
+  test("applies extraWritable and hide only inside the project", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+extraWritable = ["~/cache"]
+hide = ["~/secret"]
+`);
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      sub
+    );
+    expect(matched.exitCode).toBe(0);
+    expect(profileOf(matched.output)).toContain(
+      `(allow file-read* file-write* (subpath "${cache}"))`
+    );
+    expect(profileOf(matched.output)).toContain(
+      `(deny file-read* file-write* (subpath "${secret}"))`
+    );
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+    expect(profileOf(unmatched.output)).not.toContain(`(subpath "${cache}")`);
+    expect(profileOf(unmatched.output)).not.toContain(`(subpath "${secret}")`);
+  });
+
+  test("applies hideHomeAlways only inside the project", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+`);
+    const homeDeny = `(deny file-read* file-write* (subpath "${tempHome}"))`;
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      proj
+    );
+    expect(matched.exitCode).toBe(0);
+    expect(profileOf(matched.output)).toContain(homeDeny);
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+    expect(profileOf(unmatched.output)).not.toContain(homeDeny);
+  });
+
+  test("re-exposes project allowRead under hideHomeAlways", async () => {
+    const docs = join(tempHome, "docs");
+    await mkdir(docs);
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+allowRead = ["~/docs"]
+`);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      proj
+    );
+    expect(exitCode).toBe(0);
+    expect(profileOf(output)).toContain(`(allow file-read* (subpath "${docs}"))`);
+  });
+
+  test(
+    "emits a project writable grant before the existing hide deny",
+    async () => {
+      const ssh = join(tempHome, ".ssh");
+      await mkdir(ssh);
+      await appendProjectConfig(`[projects."~/proj"]
+extraWritable = ["~/.ssh"]
+`);
+
+      const { output, exitCode } = await runAegisDryRun(
+        "claude",
+        ["--version"],
+        [],
+        childEnv,
+        proj
+      );
+      expect(exitCode).toBe(0);
+      const lines = profileOf(output).split("\n");
+      const allowIndex = lines.indexOf(
+        `(allow file-read* file-write* (subpath "${ssh}"))`
+      );
+      const denyIndex = lines.indexOf(
+        `(deny file-read* file-write* (subpath "${ssh}"))`
+      );
+      expect(allowIndex).toBeGreaterThanOrEqual(0);
+      expect(denyIndex).toBeGreaterThan(allowIndex);
+    }
+  );
+
+  test("validates missing project hides only when the block matches", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hide = ["~/nope"]
+`);
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      proj
+    );
+    expect(matched.exitCode).toBe(1);
+    expect(matched.stderr).toContain(
+      'Invalid hide path "~/nope" in project "~/proj"'
+    );
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+  });
+
+  test("warns when a project allowRead is shadowed by a hide", async () => {
+    const ssh = join(tempHome, ".ssh");
+    await mkdir(ssh, { recursive: true });
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+allowRead = ["~/.ssh"]
+`);
+
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      proj
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain(
+      `aegis: warning: allowRead path "${ssh}" is inside hidden path`
+    );
+    expect(output).not.toBeNull();
+  });
+
+  test("unions nested project blocks", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hide = ["~/secret"]
+
+[projects."~/proj/sub"]
+extraWritable = ["~/cache"]
+`);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      childEnv,
+      sub
+    );
+    expect(exitCode).toBe(0);
+    const profile = profileOf(output);
+    expect(profile).toContain(
+      `(deny file-read* file-write* (subpath "${secret}"))`
+    );
+    expect(profile).toContain(
+      `(allow file-read* file-write* (subpath "${cache}"))`
     );
   });
 });

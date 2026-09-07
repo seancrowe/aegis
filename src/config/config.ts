@@ -23,6 +23,18 @@ export interface ToolSandboxSettings {
   hideHomeAlways?: boolean;
 }
 
+export interface ProjectBlock {
+  /**
+   * Key exactly as written in the table header, e.g. "~/Dev/aegis". Expanded
+   * at match time.
+   */
+  key: string;
+  hide: string[];
+  allowRead: string[];
+  extraWritable: string[];
+  hideHomeAlways: boolean;
+}
+
 export type ConfiguredCliDef = CliDef & ToolSandboxSettings;
 
 export interface AegisConfig {
@@ -45,6 +57,7 @@ export interface AegisConfig {
   /** CWD-relative bind overrides applied globally to every project. */
   cwdOverrides: OverrideEntry[];
   tools: ConfiguredCliDef[];
+  projects: ProjectBlock[];
 }
 
 /**
@@ -98,6 +111,7 @@ export function defaultConfig(): AegisConfig {
     // `aegis init` or `aegis tools add`; scaffolding them would make
     // `tools add <name>` fail as already-configured on a fresh install.
     tools: [],
+    projects: [],
   };
 }
 
@@ -146,6 +160,14 @@ extraWritable = [
   # "~/.gradle/caches",                      # Gradle (gradle.properties holds signing keys)
   # "~/.m2/repository",                      # Maven (settings.xml holds repo passwords)
 ]
+#
+# Per-project policy lives in this global config and applies to the named
+# directory and its descendants. Paths must be absolute or start with ~/.
+# [projects."~/Dev/app"]
+# hide = ["~/.config/acme-production"]
+# allowRead = ["~/.config/git"]
+# extraWritable = ["~/.cache/acme-build"]
+# hideHomeAlways = true
 `;
 }
 
@@ -157,6 +179,7 @@ const TOP_LEVEL_KEYS = new Set([
   "extraWritable",
   "cwdOverrides",
   "tools",
+  "projects",
 ]);
 const TOOL_KEYS = new Set([
   "name",
@@ -165,6 +188,12 @@ const TOOL_KEYS = new Set([
   "rwDirs",
   "rwFiles",
   "hide",
+  "extraWritable",
+  "hideHomeAlways",
+]);
+const PROJECT_KEYS = new Set([
+  "hide",
+  "allowRead",
   "extraWritable",
   "hideHomeAlways",
 ]);
@@ -191,10 +220,10 @@ export function validateToolKey(
 }
 
 /**
- * Bun merges repeated tool tables when their fields do not collide, so the
- * parsed object cannot tell a valid definition from two accidentally combined
- * definitions. Inspect table headers before parsing while still letting Bun
- * decide TOML syntax.
+ * Bun merges repeated tool and project tables when their fields do not collide,
+ * so the parsed object cannot tell a valid definition from two accidentally
+ * combined definitions. Inspect table headers before parsing while still
+ * letting Bun decide TOML syntax.
  *
  * This deliberately scans every line, including lines inside multi-line
  * strings. The schema's values are booleans, paths, display names, or inline
@@ -209,8 +238,13 @@ export function validateToolKey(
  * while under-reporting silently merges a tool definition. Bias this check
  * toward over-reporting.
  */
-function findDuplicateToolTable(toml: string): string | undefined {
-  const seen = new Set<string>();
+function findDuplicateTable(
+  toml: string
+): { kind: "tools" | "projects"; key: string } | undefined {
+  const seen = {
+    tools: new Set<string>(),
+    projects: new Set<string>(),
+  };
   for (const line of toml.split(/\r?\n/)) {
     const match = line.match(/^\s*\[(?!\[)(.*)\]\s*(?:#.*)?$/);
     if (!match) continue;
@@ -218,17 +252,23 @@ function findDuplicateToolTable(toml: string): string | undefined {
       const header = Bun.TOML.parse(`[${match[1]}]\n`) as unknown;
       if (!isTable(header)) continue;
       const topKeys = Object.keys(header);
-      if (topKeys.length !== 1 || topKeys[0] !== "tools") continue;
-      const tools = header.tools;
-      if (!isTable(tools)) continue;
-      const toolKeys = Object.keys(tools);
-      if (toolKeys.length !== 1) continue;
-      const toolKey = toolKeys[0]!;
-      if (!isTable(tools[toolKey]) || Object.keys(tools[toolKey]).length !== 0) {
+      if (
+        topKeys.length !== 1 ||
+        (topKeys[0] !== "tools" && topKeys[0] !== "projects")
+      ) {
         continue;
       }
-      if (seen.has(toolKey)) return toolKey;
-      seen.add(toolKey);
+      const kind = topKeys[0];
+      const table = header[kind];
+      if (!isTable(table)) continue;
+      const keys = Object.keys(table);
+      if (keys.length !== 1) continue;
+      const key = keys[0]!;
+      if (!isTable(table[key]) || Object.keys(table[key]).length !== 0) {
+        continue;
+      }
+      if (seen[kind].has(key)) return { kind, key };
+      seen[kind].add(key);
     } catch {
       // The full parser below owns syntax diagnostics, including line numbers.
     }
@@ -363,11 +403,17 @@ export function parseConfig(
 ): Result<AegisConfig, Error> {
   // The empty-document guard below separately prevents a silent empty policy.
   const content = stripBom(toml);
-  const duplicateTool = findDuplicateToolTable(content);
-  if (duplicateTool !== undefined) {
+  const duplicate = findDuplicateTable(content);
+  if (duplicate !== undefined) {
+    if (duplicate.kind === "tools") {
+      return configError(
+        configPath,
+        `Duplicate tool table "${duplicate.key}"; define each [tools.<name>] once`
+      );
+    }
     return configError(
       configPath,
-      `Duplicate tool table "${duplicateTool}"; define each [tools.<name>] once`
+      `Duplicate project table "${duplicate.key}"; define each [projects."<dir>"] once`
     );
   }
 
@@ -616,6 +662,77 @@ export function parseConfig(
     }
   }
 
+  let projects: ProjectBlock[];
+  if (obj.projects === undefined) {
+    projects = [];
+  } else {
+    if (!isTable(obj.projects)) {
+      return configError(configPath, "Invalid field: projects must be a table");
+    }
+    projects = [];
+    for (const [key, rawEntry] of Object.entries(obj.projects)) {
+      // Shape before spelling: an unquoted `[projects.Dev.app]` parses as
+      // nested tables, and naming that shape is more useful than reporting
+      // "Dev" as a bad path.
+      if (
+        !isTable(rawEntry) ||
+        Object.values(rawEntry).some((value) => isTable(value))
+      ) {
+        return configError(
+          configPath,
+          `Project "${key}" must be a table of settings; write the directory as a quoted key, e.g. [projects."~/Dev/app"]`
+        );
+      }
+      const keyResult = validatePolicyPath(key, "projects key", configPath);
+      if (!keyResult.ok) return Result.error(keyResult.error);
+      const entry = rawEntry as Record<string, unknown>;
+      for (const entryKey of Object.keys(entry)) {
+        if (!PROJECT_KEYS.has(entryKey)) {
+          return configError(
+            configPath,
+            `Unknown key "${entryKey}" in project "${key}"`
+          );
+        }
+      }
+
+      const validatedPaths: Record<
+        "hide" | "allowRead" | "extraWritable",
+        string[]
+      > = { hide: [], allowRead: [], extraWritable: [] };
+      for (const field of ["hide", "allowRead", "extraWritable"] as const) {
+        const label = `projects."${key}".${field}`;
+        const pathsResult = validateStringArray(
+          entry[field],
+          label,
+          configPath,
+          false
+        );
+        if (!pathsResult.ok) return Result.error(pathsResult.error);
+        for (const path of pathsResult.value) {
+          const pathResult = validatePolicyPath(path, label, configPath);
+          if (!pathResult.ok) return Result.error(pathResult.error);
+        }
+        validatedPaths[field] = pathsResult.value;
+      }
+      if (
+        entry.hideHomeAlways !== undefined &&
+        typeof entry.hideHomeAlways !== "boolean"
+      ) {
+        return configError(
+          configPath,
+          `Invalid project "${key}": hideHomeAlways must be a boolean`
+        );
+      }
+      projects.push({
+        key,
+        hide: validatedPaths.hide,
+        allowRead: validatedPaths.allowRead,
+        extraWritable: validatedPaths.extraWritable,
+        hideHomeAlways: entry.hideHomeAlways ?? false,
+      });
+    }
+  }
+
   return Result.ok({
     hideHomeAlways: obj.hideHomeAlways as boolean,
     homeAccess,
@@ -624,6 +741,7 @@ export function parseConfig(
     extraWritable: extraWritableResult.value,
     cwdOverrides,
     tools,
+    projects,
   });
 }
 

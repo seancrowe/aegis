@@ -4,11 +4,12 @@
  * No actual bubblewrap execution occurs.
  */
 import { describe as _describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
 import { seedCatalogConfigForHome } from "../utils/catalogConfig";
+import { OVERLAY_PREFIX } from "../../src/sandbox/bwrap";
 
 // These tests assert the bwrap argv shape, so they only run on Linux.
 // The sandbox-exec (macOS) dry-run path is covered by sandboxExecDryRun.test.ts.
@@ -213,6 +214,62 @@ describe("dry-run basic functionality", () => {
     expect(exitCode).toBe(0);
     expect(output).not.toBeNull();
     expect(output?.cmd).toBe("bwrap");
+  });
+
+  test("rejects a hide covering the working directory", async () => {
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      ["--hide", "."],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output).toBeNull();
+    expect(stderr).toContain("covers the working directory");
+  });
+
+  test("rejects a configured hide covering a tool config path", async () => {
+    await writeFile(
+      join(tempHome, ".config", "aegis", "config.toml"),
+      `hideHomeAlways = false
+hide = []
+
+[tools.claude]
+name = "claude code"
+cliCmd = "claude"
+rwDirs = [".claude"]
+hide = ["~/.claude"]
+`
+    );
+
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      [],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output).toBeNull();
+    expect(stderr).toContain("covers tool config path");
+  });
+
+  test("warns when a writable grant is shadowed without polluting stdout", async () => {
+    await mkdir(join(tempHome, ".ssh"));
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      [],
+      ["-w", join(tempHome, ".ssh")],
+      { HOME: tempHome },
+      tempProject
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain("and has no effect");
+    expect(output).not.toBeNull();
   });
 
   test("rejects every unsafe CLI -w spelling before expansion", async () => {
@@ -952,6 +1009,318 @@ ${CLAUDE_TOOL_TOML}`
     expect(output).not.toBeNull();
     // The non-existent path should NOT appear in bwrap args
     expect(output?.args).not.toContain("/this/path/does/not/exist");
+  });
+});
+
+describe("project policy", () => {
+  let tempDir: string;
+  let tempHome: string;
+  let configPath: string;
+  let proj: string;
+  let sub: string;
+  let other: string;
+  let cache: string;
+  let secret: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "aegis-project-policy-"));
+    tempHome = join(tempDir, "home");
+    proj = join(tempHome, "proj");
+    sub = join(proj, "sub");
+    other = join(tempHome, "other");
+    cache = join(tempHome, "cache");
+    secret = join(tempHome, "secret");
+    await mkdir(join(tempHome, ".claude"), { recursive: true });
+    await writeFile(join(tempHome, ".claude.json"), "{}");
+    for (const path of [sub, other, cache, secret]) {
+      await mkdir(path, { recursive: true });
+    }
+    configPath = await seedCatalogConfigForHome(tempHome);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  async function appendProjectConfig(config: string): Promise<void> {
+    await appendFile(configPath, `\n${config}`);
+  }
+
+  /** Index of a bind whose source and target are both `path`. */
+  function bindIndex(args: string[], flag: string, path: string): number {
+    return args.findIndex(
+      (value, index) =>
+        value === flag && args[index + 1] === path && args[index + 2] === path
+    );
+  }
+
+  /**
+   * Index of the hide overlay for `path`. Matching the target alone is not
+   * enough: in non-hideHome mode every top-level $HOME entry is re-bound
+   * read-only over itself first, so a hidden direct child of $HOME would
+   * match that re-bind instead. The overlay is the one whose SOURCE is the
+   * empty dir.
+   */
+  function hideIndex(args: string[], path: string): number {
+    return args.findIndex(
+      (value, index) =>
+        value === "--ro-bind" &&
+        args[index + 2] === path &&
+        basename(args[index + 1] ?? "").startsWith(OVERLAY_PREFIX)
+    );
+  }
+
+  test("reports when no project blocks are configured", async () => {
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      proj
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain("project policy: none configured");
+  });
+
+  test("reports when no project block matches", async () => {
+    await appendProjectConfig(`[projects."~/proj"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      other
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain("no [projects.*] block matches");
+  });
+
+  test("reports the matching project block", async () => {
+    await appendProjectConfig(`[projects."~/proj"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      sub
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain('matched [projects."~/proj"]');
+  });
+
+  test("reports nested matching project blocks outermost first", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+
+[projects."~/proj/sub"]
+`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      sub
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain(
+      'matched [projects."~/proj"], [projects."~/proj/sub"]'
+    );
+  });
+
+  test("reports project blocks whose directories do not exist", async () => {
+    await appendProjectConfig(`[projects."~/does-not-exist"]\n`);
+
+    const { output, stderr } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      other
+    );
+    expect(output).not.toBeNull();
+    expect(stderr).toContain(
+      '"~/does-not-exist" does not exist on disk and never matches'
+    );
+  });
+
+  test("applies extraWritable and hide only inside the project", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+extraWritable = ["~/cache"]
+hide = ["~/secret"]
+`);
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      sub
+    );
+    expect(matched.exitCode).toBe(0);
+    expect(
+      containsSequence(matched.output?.args ?? [], ["--bind", cache, cache])
+    ).toBe(true);
+    expect(
+      hideIndex(matched.output?.args ?? [], secret)
+    ).toBeGreaterThanOrEqual(0);
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+    expect(
+      containsSequence(unmatched.output?.args ?? [], ["--bind", cache, cache])
+    ).toBe(false);
+    expect(hideIndex(unmatched.output?.args ?? [], secret)).toBe(-1);
+  });
+
+  test("applies hideHomeAlways only inside the project", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+`);
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      proj
+    );
+    expect(matched.exitCode).toBe(0);
+    expect(containsSequence(matched.output?.args ?? [], ["--tmpfs", tempHome])).toBe(true);
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+    expect(containsSequence(unmatched.output?.args ?? [], ["--tmpfs", tempHome])).toBe(false);
+  });
+
+  test("re-exposes project allowRead under hideHomeAlways", async () => {
+    const docs = join(tempHome, "docs");
+    await mkdir(docs);
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+allowRead = ["~/docs"]
+`);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      proj
+    );
+    expect(exitCode).toBe(0);
+    expect(
+      containsSequence(output?.args ?? [], ["--ro-bind", docs, docs])
+    ).toBe(true);
+  });
+
+  test(
+    "emits a project writable grant before the existing hide overlay",
+    async () => {
+      const ssh = join(tempHome, ".ssh");
+      await mkdir(ssh);
+      await appendProjectConfig(`[projects."~/proj"]
+extraWritable = ["~/.ssh"]
+`);
+
+      const { output, exitCode } = await runAegisDryRun(
+        "claude",
+        ["--version"],
+        [],
+        { HOME: tempHome },
+        proj
+      );
+      expect(exitCode).toBe(0);
+      const args = output?.args ?? [];
+      const allowIndex = bindIndex(args, "--bind", ssh);
+      const denyIndex = hideIndex(args, ssh);
+      expect(allowIndex).toBeGreaterThanOrEqual(0);
+      expect(denyIndex).toBeGreaterThan(allowIndex);
+    }
+  );
+
+  test("validates missing project hides only when the block matches", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hide = ["~/nope"]
+`);
+
+    const matched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      proj
+    );
+    expect(matched.exitCode).toBe(1);
+    expect(matched.stderr).toContain(
+      'Invalid hide path "~/nope" in project "~/proj"'
+    );
+
+    const unmatched = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      other
+    );
+    expect(unmatched.exitCode).toBe(0);
+  });
+
+  test("warns when a project allowRead is shadowed by a hide", async () => {
+    const ssh = join(tempHome, ".ssh");
+    await mkdir(ssh, { recursive: true });
+    await appendProjectConfig(`[projects."~/proj"]
+hideHomeAlways = true
+allowRead = ["~/.ssh"]
+`);
+
+    const { output, stderr, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      proj
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain(
+      `aegis: warning: allowRead path "${ssh}" is inside hidden path`
+    );
+    expect(output).not.toBeNull();
+  });
+
+  test("unions nested project blocks", async () => {
+    await appendProjectConfig(`[projects."~/proj"]
+hide = ["~/secret"]
+
+[projects."~/proj/sub"]
+extraWritable = ["~/cache"]
+`);
+
+    const { output, exitCode } = await runAegisDryRun(
+      "claude",
+      ["--version"],
+      [],
+      { HOME: tempHome },
+      sub
+    );
+    expect(exitCode).toBe(0);
+    const args = output?.args ?? [];
+    expect(hideIndex(args, secret)).toBeGreaterThanOrEqual(0);
+    expect(containsSequence(args, ["--bind", cache, cache])).toBe(true);
   });
 });
 

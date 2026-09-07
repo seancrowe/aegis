@@ -35,6 +35,7 @@ describe("defaultConfig", () => {
     // A fresh config opts into nothing: tools arrive only via `aegis init` or
     // `aegis tools add`.
     expect(config.tools).toEqual([]);
+    expect(config.projects).toEqual([]);
   });
 
   test("returns a new object each time", () => {
@@ -55,6 +56,7 @@ describe("defaultConfigContent", () => {
   test("contains explanatory comments", () => {
     expect(defaultConfigContent()).toContain("#");
     expect(defaultConfigContent()).toContain("extraWritable");
+    expect(defaultConfigContent()).toContain('# [projects."');
   });
 
   // The scaffold must stay tool-free, or `aegis tools add <name>` on a fresh
@@ -916,6 +918,107 @@ rwDirs = [".x"]
 `);
     Result.assertError(result);
     expect(result.error.message).toContain('Duplicate tool table "x"');
+  });
+});
+
+describe("parseConfig — projects", () => {
+  const configWith = (block: string): string =>
+    `${defaultConfigContent()}\n${block}`;
+
+  test("parses all project settings", () => {
+    const result = parseConfig(configWith(`[projects."~/Dev/app"]
+hide = ["~/.ssh", "/tmp/hidden"]
+allowRead = ["~/.config/git"]
+extraWritable = ["~/.npm"]
+hideHomeAlways = true
+`));
+    Result.assertOk(result);
+    expect(result.value.projects[0]!.key).toBe("~/Dev/app");
+    expect(result.value.projects[0]!.hide).toEqual([
+      "~/.ssh",
+      "/tmp/hidden",
+    ]);
+    expect(result.value.projects[0]!.allowRead).toEqual(["~/.config/git"]);
+    expect(result.value.projects[0]!.extraWritable).toEqual(["~/.npm"]);
+    expect(result.value.projects[0]!.hideHomeAlways).toBe(true);
+  });
+
+  test("defaults omitted project settings", () => {
+    const result = parseConfig(configWith(`[projects."~/Dev/app"]\n`));
+    Result.assertOk(result);
+    expect(result.value.projects[0]).toEqual({
+      key: "~/Dev/app",
+      hide: [],
+      allowRead: [],
+      extraWritable: [],
+      hideHomeAlways: false,
+    });
+  });
+
+  test("preserves project declaration order", () => {
+    const result = parseConfig(configWith(`[projects."~/Dev/zed"]
+[projects."~/Dev/alpha"]
+`));
+    Result.assertOk(result);
+    expect(result.value.projects.map((project) => project.key)).toEqual([
+      "~/Dev/zed",
+      "~/Dev/alpha",
+    ]);
+  });
+
+  test("rejects invalid project blocks and settings", () => {
+    const cases = [
+      [
+        `[projects."~/Dev/app"]\nhomeAccess = "allowlist"`,
+        'Unknown key "homeAccess" in project "~/Dev/app"',
+      ],
+      [`[projects."~"]`, "home/root shorthand is not allowed"],
+      [`[projects."/"]`, "home/root shorthand is not allowed"],
+      [`[projects."Dev/app"]`, "absolute path"],
+      [
+        `[projects.Dev.app]`,
+        'Project "Dev" must be a table of settings; write the directory as a quoted key',
+      ],
+      [
+        `[projects."~/Dev/app"]\nhideHomeAlways = "yes"`,
+        'Invalid project "~/Dev/app": hideHomeAlways must be a boolean',
+      ],
+      [
+        `[projects."~/Dev/app"]\nhide = ["secrets"]`,
+        "absolute path",
+      ],
+      [`[[projects]]`, "Invalid field: projects must be a table"],
+    ] as const;
+    for (const [block, message] of cases) {
+      const result = parseConfig(configWith(block), "/tmp/projects.toml");
+      Result.assertError(result);
+      expect(result.error.message).toContain("/tmp/projects.toml");
+      expect(result.error.message).toContain(message);
+    }
+  });
+
+  test("rejects duplicate project tables", () => {
+    const result = parseConfig(configWith(`[projects."~/Dev/app"]
+hide = []
+[projects."~/Dev/app"]
+allowRead = []
+`));
+    Result.assertError(result);
+    expect(result.error.message).toContain(
+      'Duplicate project table "~/Dev/app"; define each [projects."<dir>"] once'
+    );
+  });
+
+  test("duplicate tool tables retain their original diagnostic", () => {
+    const result = parseConfig(configWith(`[tools.claude]
+name = "Claude Code"
+[tools.claude]
+cliCmd = "claude"
+`));
+    Result.assertError(result);
+    expect(result.error.message).toContain(
+      'Duplicate tool table "claude"; define each [tools.<name>] once'
+    );
   });
 });
 

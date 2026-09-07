@@ -160,6 +160,8 @@ aegis claude --hide-home --version
 
 Config is stored at `$XDG_CONFIG_HOME/aegis/config.toml` (defaults to `~/.config/aegis/config.toml`) and parsed as TOML. Per-project overrides are stored in `.aegis.toml` under the `overrides` key. On first run aegis writes a commented template you can edit in place.
 
+TOML top-level keys must appear before any `[tools.*]` or `[projects.*]` table; everything after a table header belongs to that table until the next header.
+
 There are **no built-in tools**, and the generated template declares none — a fresh install sandboxes nothing until you opt a tool in with `aegis init` (detects installed agents) or `aegis tools add <name>`. Each tool is one `[tools.<name>]` table; deleting a table removes that command, and no `tools` table or an empty `[tools]` table means no tools.
 
 This illustrative config shows the main global settings and one tool with
@@ -228,6 +230,41 @@ remove a global hide. Per-tool `hide` and `extraWritable` still apply in
 allowlist mode; `hide` can cover paths outside `$HOME`, while `extraWritable`
 creates an explicit writable carve-out. Per-tool `hideHomeAlways` only changes
 blocklist mode because allowlist mode already masks `$HOME`.
+
+### Per-project policy
+
+A project block in your global config adds policy whenever aegis starts in that directory or any directory beneath it:
+
+```toml
+[projects."~/Dev/app"]
+hide = ["~/.config/acme-production"]
+allowRead = ["~/.config/git"]
+extraWritable = ["~/.cache/acme-build"]
+hideHomeAlways = true
+
+[projects."~/Dev/app/services/payments"]
+hide = ["~/.config/acme-staging"]
+```
+
+Project keys must be quoted absolute paths or `~/...` paths. Matching uses resolved real paths at directory-component boundaries: `~/Dev/app` matches that directory and its descendants, including access through a symlink, but not `~/Dev/app-fork`. This also handles canonical aliases such as `/tmp` and `/private/tmp` on macOS. Every enclosing block applies, outermost first, and its settings are unioned; there is no most-specific-wins behavior that lets an inner block suppress an outer rule.
+
+Project policy is additive. It can add hides, readable paths, writable paths, and home masking, but cannot remove global or per-tool restrictions. A hide always wins over `allowRead` or `extraWritable`, regardless of which layer supplied either setting; aegis warns on stderr when a grant is inside a hidden path and therefore has no effect. `hideHomeAlways = true` is OR'd with the global and per-tool settings. `homeAccess` is deliberately not allowed in a project block because a project-level `"blocklist"` could loosen a global `"allowlist"`. Any other unrecognized project key is also a config error.
+
+All paths inside a project block must be absolute or start with `~/`; relative paths are rejected. Project `hide` entries are strict: each must exist and be a directory, unlike a missing global `hide`, which is silently skipped. A hide that covers the working directory or a tool's own `rwDirs`/`rwFiles` config path is a startup error. Hiding a descendant of a tool config directory, such as `~/.claude/projects/other-client`, remains valid.
+
+A `hide` entry cannot name a single file. To hide a file such as `~/.npmrc` or `~/.netrc`, use a mask entry in global `cwdOverrides` or in the repository's `.aegis.toml` instead.
+
+These two project mechanisms have different trust and capabilities. A `[projects."..."]` block lives in your own global config and may grant read or write access. A repository-local `.aegis.toml` arrives with a git clone, is untrusted, and can only restrict by masking a path or substituting a file; it can never grant access. That asymmetry is why project policy capable of granting access lives only in the global config.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `[projects."<dir>"]` | table | Adds policy when cwd is this directory or a descendant; every enclosing block applies |
+| `[projects."<dir>"].hide` | `string[]` | Optional existing directories to hide. Paths are strict and additive; a hide wins over any grant |
+| `[projects."<dir>"].allowRead` | `string[]` | Optional paths to expose read-only when `$HOME` is masked. Adds to global `allowRead`; hides still win |
+| `[projects."<dir>"].extraWritable` | `string[]` | Optional paths to keep writable. Adds to global and per-tool grants; hides still win |
+| `[projects."<dir>"].hideHomeAlways` | `boolean` | When `true`, masks `$HOME` for the matched subtree. OR'd with global and per-tool settings |
+
+`aegis <tool> --dry-run` reports matched project blocks on stderr. It distinguishes no configured blocks from no matching blocks and also names configured project directories that do not exist.
 
 > **When do you need `extraWritable`?** If a sandboxed tool fails with "operation not permitted" while writing *outside* your project (a compiler populating its cache, a package manager, etc.), add that directory here. Writes to cwd, the tool's own config, `/tmp`/`$TMPDIR`, and the standard device nodes (`/dev/null`, `/dev/urandom`, ptys, …) already work without configuration.
 

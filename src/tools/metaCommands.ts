@@ -76,6 +76,17 @@ Tool tables:
   extraWritable = ["path", ...]            optional
   hideHomeAlways = boolean                 optional
 
+Project tables:
+  [projects."~/Dev/app"]
+  # Additional existing directories to hide for this subtree.
+  hide = ["path", ...]
+  # Additional paths to expose read-only when home is masked.
+  allowRead = ["path", ...]
+  # Additional directories to keep writable for this subtree.
+  extraWritable = ["path", ...]
+  # Mask home for this subtree; OR'd with global and tool settings.
+  hideHomeAlways = boolean
+
 Tool keys may contain A-Z, a-z, 0-9, dot, underscore, and hyphen; they may not
 start with a hyphen or be named tools, init, or help. Writable paths must be
 relative to $HOME and may not resolve to $HOME or traverse through "..".

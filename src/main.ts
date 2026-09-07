@@ -25,6 +25,11 @@ import {
   resolveOverrides,
   assertContentOverridesSupported,
 } from "./config/overrides";
+import { matchProjectBlocks, type ProjectMatch } from "./config/projects";
+import {
+  checkHideConflicts,
+  findShadowedGrants,
+} from "./config/policyChecks";
 import { filterAegisFlags, normalizeToolArgs } from "./tools/tool";
 import { runMetaCommand } from "./tools/metaCommands";
 import {
@@ -47,17 +52,21 @@ interface ResolvedSandboxSettings {
   hideHome: boolean;
   hidePaths: string[];
   extraWritable: string[];
+  allowRead: string[];
 }
 
 /**
- * Resolve every additive sandbox setting at the command boundary so both
- * backends receive one policy rather than learning config precedence.
+ * Resolve every additive sandbox setting, including matched project blocks,
+ * at the command boundary so both backends receive one flat policy rather
+ * than learning config precedence.
  */
 function resolveSandboxSettings(
   config: AegisConfig,
   cliDef: ConfiguredCliDef,
   options: SubCmdOpts,
-  home: string
+  home: string,
+  cwd: string,
+  projects: ProjectMatch[]
 ): Result<ResolvedSandboxSettings, Error> {
   // Global hide stays lenient for backward compatibility; per-tool hide is
   // strict because this is new surface with no legacy typos to preserve.
@@ -75,9 +84,26 @@ function resolveSandboxSettings(
     }
   }
 
+  const projectHide: string[] = [];
+  for (const { block } of projects) {
+    const expanded = expandUserPaths(block.hide, home);
+    for (let i = 0; i < expanded.length; i++) {
+      const validation = validateHidePaths([expanded[i]!]);
+      if (!validation.ok) {
+        return Result.error(
+          new Error(
+            `${getConfigPath()}: Invalid hide path ${JSON.stringify(block.hide[i])} ` +
+              `in project "${block.key}": ${validation.error.message}`
+          )
+        );
+      }
+      projectHide.push(expanded[i]!);
+    }
+  }
+
   const cliHide: string[] = [];
   for (const path of options.hide ?? []) {
-    const resolved = resolveAndValidateHidePath(path, process.cwd());
+    const resolved = resolveAndValidateHidePath(path, cwd);
     if (!resolved.ok) return Result.error(resolved.error);
     cliHide.push(resolved.value);
   }
@@ -87,19 +113,31 @@ function resolveSandboxSettings(
     if (!validation.ok) return Result.error(validation.error);
   }
 
-  // a per-tool hide can only add; only allowRead subtracts.
+  // Per-tool and project hides can only add; only allowRead subtracts.
   return Result.ok({
     hideHome:
       config.homeAccess === "allowlist" ||
       config.hideHomeAlways ||
       !!cliDef.hideHomeAlways ||
-      !!options.hideHome,
-    hidePaths: [...configHide, ...toolHide, ...cliHide],
+      !!options.hideHome ||
+      projects.some((p) => p.block.hideHomeAlways),
+    hidePaths: [...configHide, ...toolHide, ...projectHide, ...cliHide],
     extraWritable: expandUserPaths(
       [
         ...config.extraWritable,
         ...(cliDef.extraWritable ?? []),
+        ...projects.flatMap((p) => p.block.extraWritable),
         ...(options.writable ?? []),
+      ],
+      home
+    ),
+    // Match extraWritable's lenient expansion convention: Seatbelt rules
+    // remain useful before a path exists, while bwrap skips missing bind
+    // sources because it cannot bind them safely.
+    allowRead: expandUserPaths(
+      [
+        ...config.allowRead,
+        ...projects.flatMap((p) => p.block.allowRead),
       ],
       home
     ),
@@ -196,6 +234,8 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
 
         // 2. Effective options
         const home = homedir();
+        const cwd = process.cwd();
+        const projectMatch = matchProjectBlocks(config.projects, cwd, home);
         // Applied in BOTH modes. Allowlist masks $HOME wholesale, which makes
         // global and per-tool hide entries *under* home redundant — but entries
         // OUTSIDE home are not covered by the mask. Applying both lists in
@@ -205,18 +245,53 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
           config,
           cliDef,
           options,
-          home
+          home,
+          cwd,
+          projectMatch.matched
         );
         if (!settingsResult.ok) {
           process.stderr.write(settingsResult.error.message + "\n");
           process.exit(1);
         }
-        const { hideHome, hidePaths: allHidePaths, extraWritable } =
-          settingsResult.value;
-        // Match extraWritable's lenient expansion convention: Seatbelt rules
-        // remain useful before a path exists, while bwrap skips missing bind
-        // sources because it cannot bind them safely.
-        const allowRead = expandUserPaths(config.allowRead, home);
+        const {
+          hideHome,
+          hidePaths: allHidePaths,
+          extraWritable,
+          allowRead,
+        } = settingsResult.value;
+
+        // 3. Policy conflict checks — run on the merged hide list, so they
+        //    also catch a global, per-tool or CLI hide that would otherwise
+        //    produce a silently broken sandbox.
+        const hostPaths = cliDef.rwPaths.map((rp) => ({
+          path: join(home, rp.path),
+          kind: rp.kind,
+        }));
+
+        const hideConflict = checkHideConflicts(
+          allHidePaths,
+          cwd,
+          hostPaths,
+          cliDef.subCommand
+        );
+        if (!hideConflict.ok) {
+          process.stderr.write(hideConflict.error.message + "\n");
+          process.exit(1);
+        }
+
+        const shadowedGrants = findShadowedGrants(allHidePaths, [
+          ...extraWritable.map((path) => ({
+            label: "extraWritable" as const,
+            path,
+          })),
+          ...allowRead.map((path) => ({ label: "allowRead" as const, path })),
+        ]);
+        for (const grant of shadowedGrants) {
+          process.stderr.write(
+            `aegis: warning: ${grant.label} path "${grant.path}" is inside ` +
+              `hidden path "${grant.hide}" and has no effect\n`
+          );
+        }
 
         // 4. Get raw args from process.argv (after subcommand)
         const subIdx = process.argv.indexOf(cliDef.subCommand, 2);
@@ -226,11 +301,7 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
         const filtered = filterAegisFlags(rawArgs);
         const toolArgs = normalizeToolArgs(filtered, cliDef);
 
-        // 6. Ensure host paths exist
-        const hostPaths = cliDef.rwPaths.map((rp) => ({
-          path: join(home, rp.path),
-          kind: rp.kind,
-        }));
+        // 6. Ensure tool config paths exist on the host
         const ensureResult = await ensureHostPathsExist(hostPaths);
         if (!ensureResult.ok) {
           process.stderr.write(ensureResult.error.message + "\n");
@@ -250,7 +321,6 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
         const tmpPaths = backend.needsTmpPaths ? resolveTmpPaths() : [];
 
         // 8. Load project overrides (.aegis.toml)
-        const cwd = process.cwd();
         const projResult = await loadProjectOverrides(cwd);
         if (!projResult.ok) {
           process.stderr.write(projResult.error.message + "\n");
@@ -319,6 +389,25 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
         }
 
         if (options.dryRun) {
+          if (config.projects.length === 0) {
+            process.stderr.write("aegis: project policy: none configured\n");
+          } else if (projectMatch.matched.length === 0) {
+            process.stderr.write(
+              `aegis: project policy: no [projects.*] block matches ${cwd}\n`
+            );
+          } else {
+            const matchedBlocks = projectMatch.matched
+              .map(({ block }) => `[projects."${block.key}"]`)
+              .join(", ");
+            process.stderr.write(
+              `aegis: project policy: matched ${matchedBlocks}\n`
+            );
+          }
+          for (const block of projectMatch.missing) {
+            process.stderr.write(
+              `aegis: project policy: "${block.key}" does not exist on disk and never matches\n`
+            );
+          }
           console.log(JSON.stringify(cmdResult.value));
           process.exit(0);
         }
