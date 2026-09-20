@@ -318,6 +318,54 @@ extraWritable = [
 
 CLI flags are merged with config at runtime but **never persisted** back to config.
 
+#### Routing a tool through a proxy (e.g. [ocgo](https://github.com/emanuelcasco/ocgo))
+
+`cliCmd` does not have to be the tool's own binary — it can be anything on
+`PATH`, including a launcher that starts the tool as a child process. This is
+how you'd route Claude Code through [ocgo](https://github.com/emanuelcasco/ocgo),
+a local proxy that maps Claude/Codex model names to an OpenCode Go
+subscription: point `cliCmd` at `ocgo` and let it exec `claude` for you.
+
+This is config-only — no aegis code changes — but `aegis <tool>` forwards
+whatever you type straight to `cliCmd` with no fixed prefix, and `yoloArg` is
+always inserted as `cliCmd`'s *first* argument. Neither assumption holds once
+`cliCmd` is a launcher rather than the tool itself:
+
+```toml
+[tools.claude]
+name = "claude code"
+cliCmd = "claude"
+yoloArg = "--dangerously-skip-permissions"
+rwDirs = [".claude"]
+rwFiles = [".claude.json"]
+```
+
+```toml
+[tools.claude]
+name = "claude code (via ocgo)"
+cliCmd = "~/.local/bin/aegis-ocgo-claude"  # wrapper, see below — NOT "ocgo"
+# yoloArg intentionally omitted: aegis would inject it as cliCmd's first
+# arg (`ocgo --dangerously-skip-permissions launch claude ...`), which lands
+# before "launch" instead of after claude's own "--". Bake claude's YOLO
+# flag into the wrapper's `-- ...` tail instead.
+rwDirs = [".claude", ".config/ocgo"]       # ocgo's own config/API key + claude's
+rwFiles = [".claude.json"]
+```
+
+`ocgo launch claude` expects `ocgo launch claude --model <name> -- <claude args>`,
+not `claude`'s own args directly — aegis has no field for that fixed prefix.
+Put the prefix in a one-line wrapper and point `cliCmd` at the wrapper instead
+of at `ocgo`:
+
+```bash
+#!/usr/bin/env bash
+exec ocgo launch claude --model kimi-k2.6 --yes -- "$@"
+```
+
+`rwDirs` needs both directories: `claude` still reads and writes its own
+`~/.claude` config as a child process, and ocgo separately keeps its API key
+and `~/.config/ocgo/model-mapping.json` under `~/.config/ocgo`.
+
 ## How It Works
 
 aegis selects a backend by platform (`bwrap` on Linux, `sandbox-exec` on macOS) and feeds both the same resolved options.
