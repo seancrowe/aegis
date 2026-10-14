@@ -264,7 +264,7 @@ These two project mechanisms have different trust and capabilities. A `[projects
 | `[projects."<dir>"].extraWritable` | `string[]` | Optional paths to keep writable. Adds to global and per-tool grants; hides still win |
 | `[projects."<dir>"].hideHomeAlways` | `boolean` | When `true`, masks `$HOME` for the matched subtree. OR'd with global and per-tool settings |
 
-`aegis <tool> --dry-run` reports matched project blocks on stderr. It distinguishes no configured blocks from no matching blocks and also names configured project directories that do not exist.
+`aegis <tool> --dry-run` reports matched project blocks on stderr, distinguishing no configured blocks from no matching blocks. A project directory that does not exist on disk (usually a typo in the key) can never match, so aegis warns about it on every run, not only under `--dry-run`.
 
 > **When do you need `extraWritable`?** If a sandboxed tool fails with "operation not permitted" while writing *outside* your project (a compiler populating its cache, a package manager, etc.), add that directory here. Writes to cwd, the tool's own config, `/tmp`/`$TMPDIR`, and the standard device nodes (`/dev/null`, `/dev/urandom`, ptys, …) already work without configuration.
 

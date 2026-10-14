@@ -848,7 +848,7 @@ describe("project policy", () => {
     );
     expect(output).not.toBeNull();
     expect(stderr).toContain(
-      '"~/does-not-exist" does not exist on disk and never matches'
+      'aegis: warning: project "~/does-not-exist" does not exist on disk and never matches'
     );
   });
 

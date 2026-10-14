@@ -293,6 +293,14 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
           );
         }
 
+        // A mistyped project key never matches, so its hides silently never
+        // apply. Warn on every run, not just --dry-run, since that is fail-open.
+        for (const block of projectMatch.missing) {
+          process.stderr.write(
+            `aegis: warning: project "${block.key}" does not exist on disk and never matches\n`
+          );
+        }
+
         // 4. Get raw args from process.argv (after subcommand)
         const subIdx = process.argv.indexOf(cliDef.subCommand, 2);
         const rawArgs = subIdx >= 0 ? process.argv.slice(subIdx + 1) : _passedArgs;
@@ -401,11 +409,6 @@ Run \`aegis <tool> --help\` for the full per-tool flag list.`
               .join(", ");
             process.stderr.write(
               `aegis: project policy: matched ${matchedBlocks}\n`
-            );
-          }
-          for (const block of projectMatch.missing) {
-            process.stderr.write(
-              `aegis: project policy: "${block.key}" does not exist on disk and never matches\n`
             );
           }
           console.log(JSON.stringify(cmdResult.value));
